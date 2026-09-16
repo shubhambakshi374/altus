@@ -316,3 +316,123 @@ def test_the_kubernetes_subresource_still_outranks_its_verb() -> None:
     if tool is None:
         pytest.skip("k8s extra not installed")
     assert sensitivity_of(tool) is Sensitivity.PRIVILEGED
+
+
+# ------------------------------------------------------------- the designer
+
+
+def make_app():  # type: ignore[no-untyped-def]
+    from altus.config.models import Config
+    from altus.tui.app import AltusApp
+    from tests.test_tui import FakeProvider
+
+    return AltusApp(config=Config(), provider=FakeProvider())
+
+
+async def test_the_designer_opens_adds_a_step_and_saves(registry: ToolRegistry) -> None:
+    """The whole loop, through the real screens rather than their internals.
+
+    This is the test that would have caught the step form saving a prompt onto
+    an approval step, which is why the kind is chosen before the form is built.
+    """
+    from altus.tui.screens.workflow import WorkflowScreen
+
+    app = make_app()
+    async with app.run_test() as pilot:
+        app.registry = registry  # type: ignore[assignment]
+        screen = WorkflowScreen(Workflow(name="nightly"))
+        await app.push_screen(screen)
+        await pilot.pause()
+
+        screen.workflow.steps.append(ToolStep(id="look", tool="k8s_topology"))
+        screen._changed()
+        await pilot.pause()
+        assert screen.dirty
+
+        screen.action_save()
+        await pilot.pause()
+        assert not screen.dirty
+        assert load("nightly").steps[0].id == "look"
+
+
+async def test_deleting_a_step_takes_its_edges_with_it(registry: ToolRegistry) -> None:
+    """Otherwise the author is left with a fatal `needs` they never wrote."""
+    from textual.widgets import OptionList
+
+    from altus.tui.screens.workflow import WorkflowScreen
+
+    workflow = Workflow(
+        name="x",
+        steps=[
+            ToolStep(id="first", tool="k8s_get"),
+            ToolStep(id="second", needs=["first"], tool="k8s_get"),
+        ],
+    )
+    app = make_app()
+    async with app.run_test() as pilot:
+        app.registry = registry  # type: ignore[assignment]
+        screen = WorkflowScreen(workflow)
+        await app.push_screen(screen)
+        await pilot.pause()
+        screen.query_one("#steps", OptionList).highlighted = 0
+        screen.action_delete()
+        await pilot.pause()
+
+        assert workflow.ids == ["second"]
+        assert workflow.steps[0].needs == []
+        assert not fatal(check(workflow, registry))
+
+
+async def test_escape_with_unsaved_changes_does_not_discard_on_the_first_press(
+    registry: ToolRegistry,
+) -> None:
+    from altus.tui.screens.workflow import WorkflowScreen
+
+    app = make_app()
+    async with app.run_test() as pilot:
+        app.registry = registry  # type: ignore[assignment]
+        screen = WorkflowScreen(Workflow(name="x", steps=[ApprovalStep(id="a")]))
+        await app.push_screen(screen)
+        await pilot.pause()
+        screen._changed()
+
+        screen.action_close()
+        await pilot.pause()
+        assert app.screen is screen, "a single escape must not throw away the work"
+
+        screen.action_close()
+        await pilot.pause()
+        assert app.screen is not screen
+
+
+async def test_the_step_form_refuses_arguments_that_are_not_a_json_object(
+    registry: ToolRegistry,
+) -> None:
+    from textual.widgets import Input, Label
+
+    from altus.tui.widgets.step_form import StepForm
+
+    app = make_app()
+    async with app.run_test() as pilot:
+        form = StepForm("tool", registry)
+        await app.push_screen(form)
+        await pilot.pause()
+        form.query_one("#id", Input).value = "look"
+        form.query_one("#tool", Input).value = "k8s_get"
+        form.query_one("#args", Input).value = "[1, 2]"
+        form.action_submit()
+        await pilot.pause()
+
+        assert app.screen is form, "a bad form does not dismiss"
+        assert "JSON object" in str(form.query_one("#problem", Label).render())
+
+
+async def test_the_tool_picker_shows_what_each_tool_costs(registry: ToolRegistry) -> None:
+    """The point of the picker: the level is visible at the moment of choosing,
+    not discovered later at a gate."""
+    from altus.tui.widgets.step_form import ToolPicker
+
+    picker = ToolPicker(registry)
+    rows = dict(picker.rows)
+    assert rows["k8s_topology"] == "read"
+    assert rows["k8s_apply"] == "mutate — arguments decide"

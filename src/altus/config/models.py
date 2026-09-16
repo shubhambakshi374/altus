@@ -202,6 +202,24 @@ class McpServerSettings(BaseModel):
     tools is less to classify and less that can drift."""
 
 
+class WorkflowSettings(BaseModel):
+    """Workflows: where they live, and who may write one.
+
+    ``allow_model_authoring`` is not a convenience switch. A workflow file is a
+    queued set of actions against real infrastructure, so letting the model
+    write one is a different permission from letting it call a tool, and
+    somebody running Altus in anger should be able to say workflows come only
+    from humans.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    dir: str = ""
+    """Empty means <config>/workflows."""
+    allow_model_authoring: bool = True
+
+
 class McpSettings(BaseModel):
     """The MCP servers Altus ships kitted out.
 
@@ -326,6 +344,7 @@ class Config(BaseModel):
     tools: ToolSettings = Field(default_factory=ToolSettings)
     cloud: CloudSettings = Field(default_factory=CloudSettings)
     mcp: McpSettings = Field(default_factory=McpSettings)
+    workflow: WorkflowSettings = Field(default_factory=WorkflowSettings)
     ui: UISettings = Field(default_factory=UISettings)
 
     def provider_settings(self, name: str) -> ProviderSettings:

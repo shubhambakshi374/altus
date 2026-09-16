@@ -552,6 +552,26 @@ async def cmd_gcp(app: AltusApp, args: list[str]) -> CommandResult:
     return CommandResult("\n".join(rows), title="GCP")
 
 
+async def cmd_workflow(app: AltusApp, args: list[str]) -> CommandResult:
+    """Compose a workflow: several steps, in an order, with one blast radius.
+
+    Bare ``/workflow`` opens the designer, because a session registers more
+    tools than anyone holds in their head and a designer that makes you type
+    the name from memory is a text editor with extra steps.
+
+    Nothing here runs a step. There is no engine yet, and this command says so
+    in those words rather than implying one.
+    """
+    from altus.tui.screens.workflow import open_designer
+
+    settings = app.config.workflow
+    if not settings.enabled:
+        return CommandResult.warn("Workflows are disabled ([workflow] enabled = false).")
+
+    open_designer(app, args[0] if args else "", settings)
+    return CommandResult.silent()
+
+
 async def cmd_graphics(app: AltusApp, args: list[str]) -> CommandResult:
     """What is being drawn and why --- the answer to "where are my pictures"."""
     from altus.render.capability import Support, available, detect, explain, images_installed
@@ -642,6 +662,13 @@ def build_registry() -> CommandRegistry:
             "Several read-only views on one screen",
             "dashboard [aws | azure | gcp | k8s] [<scope>]",
             cmd_dashboard,
+        ),
+        Command(
+            "workflow",
+            "Design a multi-step workflow",
+            "workflow [<name>]",
+            cmd_workflow,
+            aliases=("workflows",),
         ),
         Command(
             "graphics",

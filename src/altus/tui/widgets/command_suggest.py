@@ -19,11 +19,13 @@ from altus.tui.commands.registry import Command, CommandRegistry
 #: A bare `/` is meant to show everything --- the popup exists so you do
 #: not have to know the names already. Keep this at or above the number of
 #: registered commands; tests/test_tui.py asserts the two stay in step.
-MAX_SHOWN = 16
+MAX_SHOWN = 24
 MAX_SIGNATURE = 34
-MIN_SUMMARY_MATCH = 2
-"""Matching summaries on one character is noise: `/k` would offer `model`
-because its summary contains "Pick"."""
+MIN_MATCH = 2
+"""Matching anywhere but the start on one character is noise. It ruled out
+summaries first --- `/k` would offer `model`, whose summary contains "Pick"
+--- and names turn out to need it too: `/k` offered `workflow`, because
+"workflow" contains a k. One character matches by prefix only."""
 
 
 @dataclass(frozen=True)
@@ -61,10 +63,8 @@ def match(registry: CommandRegistry, text: str) -> list[Suggestion]:
         c
         for c in registry.unique
         if c not in starts
-        and (
-            needle in c.name
-            or (len(needle) >= MIN_SUMMARY_MATCH and needle in c.summary.casefold())
-        )
+        and len(needle) >= MIN_MATCH
+        and (needle in c.name or needle in c.summary.casefold())
     ]
     return [Suggestion(c, f"/{c.name}") for c in (*starts, *contains)][:MAX_SHOWN]
 

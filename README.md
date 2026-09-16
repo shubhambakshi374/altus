@@ -186,7 +186,9 @@ for the command you are writing.
 | `/mcp` · `/mcp check` | MCP servers, what each covers, and drift against the manifest |
 | `/workflow` · `/workflow <name>` | Open the workflow designer |
 | `/workflow new <what it should do>` | Describe one; the model drafts it, you approve the file |
-| `/workflow list` · `show` · `validate` · `path` · `run <name>` | The same workflows from the keyboard |
+| `/workflow list` · `show` · `validate` · `path <name>` | The same workflows from the keyboard |
+| `/workflow run <name>` | Run one, step by step, on a screen |
+| `/workflow runs` · `/workflow runs <id>` | What has been run, and what happened |
 | `/dashboard [aws \| azure \| gcp \| k8s] [<scope>]` | Several read-only views on one screen |
 | `/graphics [auto \| image \| cells \| off]` | How visuals are drawn, and why |
 | `/tools` | Tools, installed integrations, standing approvals |
@@ -471,8 +473,8 @@ composable half of the software factory. `/workflow` opens the designer;
 `/workflow new "deploy the API to staging"` describes one in words and lets the
 model draft it.
 
-**Nothing runs one yet.** The engine is the next increment, and `/workflow run`
-says exactly that rather than implying otherwise.
+`/workflow run` runs one, a step at a time, on a screen that shows each one
+resolving.
 
 Three kinds of step, because three is what Altus can do today:
 
@@ -512,6 +514,68 @@ message = "ship to staging?"
 
 One file each, under `<config>/workflows`, meant to be diffed and committed
 next to the code it operates on.
+
+### Steps pass text, and only to steps they depend on
+
+`${inventory}` anywhere in a later step's arguments, prompt or message is
+replaced with what the step called `inventory` produced. That is the whole
+mechanism — one substitution, no expressions.
+
+An expression language was the alternative and it is the wrong trade. Every one
+of them grows conditionals, and a workflow whose *shape* depends on values
+computed at run time cannot have its blast radius worked out before it runs —
+which is the property this whole design is built on. Anything cleverer is an
+`agent` step's job, where the gate is already watching.
+
+**`${x}` is fatal unless `x` is in the transitive closure of `needs`.** Order in
+the file guarantees nothing, because the engine runs the graph; a reference to a
+merely-earlier step would work right up until somebody reordered two
+independent steps.
+
+### What happens when step 3 of 6 fails
+
+The run stops, and everything after it is **skipped by name** — a step that
+never ran did not fail, and a trail that cannot say what did *not* happen is not
+a trail.
+
+```
+  ✓ listing            list_dir                     1 entries in .  0.01s
+  ✓ readit             read_file                    read 1 line of notes.md  0.0s
+  ✓ copy               write_file                   created copy.md  0.0s
+  ✗ boom               read_file                    not found  0.0s
+  ~ never              list_dir                     the run stopped at boom
+
+Stopped by a failure — 4 steps ran, 1 skipped, 0.02s
+  record: ~/.local/share/altus/runs/r_1a0a915324eb.jsonl
+```
+
+`on_error = "continue"` opts out per step, for the ones the rest genuinely does
+not depend on. A step that *needed* the failed one is still skipped: `continue`
+means the run survives, not that the failure did not matter.
+
+### Two gates, not one
+
+Every mutation inside a run still asks for itself, exactly as it does in chat —
+the engine calls the same tools through the same registry. What running adds is
+**one question before anything starts**, because agreeing to six actions
+individually, in sequence, with no sight of the whole is how consent gets worn
+down. That question goes through the ordinary approval machinery, so a workflow
+whose blast radius is privileged demands the typed challenge without the run
+screen knowing the rule. Declining at either level stops the run.
+
+Steps run one at a time in dependency order, ties broken by the file's order.
+`needs` describes a DAG and independent branches *could* run concurrently; they
+do not, because a sequential run is the one whose record reads like what
+happened.
+
+### Every run leaves a record
+
+One JSONL file per run under `<data>/runs`, written as it happens rather than
+at the end — the runs you most want a record of are the ones that were
+interrupted, and a record assembled at the end is exactly the record those runs
+never get. `/workflow runs` lists them; `/workflow runs <id>` reads one back.
+
+A run with no closing line reads as `interrupted`, never as completed.
 
 ### The blast radius is a floor, and says when it is one
 
@@ -943,7 +1007,7 @@ tests/         mirrors it; tests/__snapshots__ holds the TUI SVGs
 - **Phase 2e — Google Cloud.** ✅ Asset-inventory search, VPC topology, quotas, and changes behind a gate that is honest about having almost nothing to preview.
 - **Phase 2f — MCP.** ✅ Seven vendor servers kitted out, classified against a curated manifest that fails closed, with a gate honest about having no preview at all.
 - **Phase 3a — the workflow designer.** ✅ Compose multi-step workflows in a screen, in conversation or in a file, each with one honest blast radius. Headless, which is the promise the layering guard has been keeping since Phase 1.
-- **Phase 3b — the engine.** Run them: how a step's output reaches the next, what happens when step 3 of 6 fails, and how a run is recorded so it can be audited.
+- **Phase 3b — the engine.** ✅ Run them: `${step}` substitution between steps, a failure that stops the run and names what it skipped, two gates, and a JSONL record written as it happens.
 - **Phase 3+ —** shell execution, then the software factory built on the workflow engine.
 
 ## License

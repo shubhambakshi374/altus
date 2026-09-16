@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -127,7 +127,7 @@ async def run_workflow(
     confirm: Any = None,
     record: bool = True,
     runs_root: Path | None = None,
-) -> AsyncIterator[RunEvent]:
+) -> AsyncGenerator[RunEvent]:
     """Execute ``workflow``, yielding one event per thing that happens.
 
     ``confirm`` is an async callable taking the ``RunStarted`` event and the

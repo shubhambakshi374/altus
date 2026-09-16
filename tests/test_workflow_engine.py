@@ -422,3 +422,165 @@ async def test_a_cancelled_run_still_leaves_a_record(
     events = read_run(run_id, root)
     assert events[-1].type == "run_finished"
     assert events[-1].state == "cancelled"
+
+
+# --------------------------------------------------------------- the run screen
+
+
+def make_app(tree: Path):  # type: ignore[no-untyped-def]
+    from altus.config.models import Config
+    from altus.tools.approval import SessionApprovals
+    from altus.tui.app import AltusApp
+
+    app = AltusApp(config=Config(), provider=FakeProvider(), workspace_root=str(tree))
+    app.approvals = SessionApprovals(AllowAll())
+    app.tool_ctx.approvals = app.approvals
+    return app
+
+
+async def drive(app, screen, pilot) -> None:  # type: ignore[no-untyped-def]
+    await app.push_screen(screen)
+    for _ in range(80):
+        await pilot.pause()
+        if screen.finished:
+            return
+    raise AssertionError("the run never finished")
+
+
+def rows(screen) -> str:  # type: ignore[no-untyped-def]
+    return "\n".join(str(widget.render()) for widget in screen.query(".step"))
+
+
+def outcome(screen) -> str:  # type: ignore[no-untyped-def]
+    from textual.widgets import Static
+
+    return str(screen.query_one("#outcome", Static).render())
+
+
+async def test_the_screen_shows_each_step_resolving(tree: Path) -> None:
+    from altus.tui.screens.run import RunScreen
+
+    workflow = Workflow(
+        name="demo",
+        steps=[
+            read(id="ok"),
+            read("gone.md", id="boom", needs=["ok"]),
+            read(id="never", needs=["boom"]),
+        ],
+    )
+    app = make_app(tree)
+    async with app.run_test() as pilot:
+        screen = RunScreen(workflow)
+        await drive(app, screen, pilot)
+
+        shown = rows(screen)
+        assert "✓ ok" in shown
+        assert "✗ boom" in shown
+        assert "the run stopped at boom" in shown
+        assert "Stopped by a failure" in outcome(screen)
+        assert "record:" in outcome(screen), "and where to read it back"
+
+
+async def test_the_run_gate_fires_before_any_step(tree: Path) -> None:
+    """Agreeing to six actions one at a time, with no sight of the whole, is
+    how consent gets worn down. So there is one question up front too."""
+    from altus.tools.approval import RecordingPolicy, SessionApprovals
+    from altus.tui.screens.run import RunScreen
+
+    policy = RecordingPolicy()
+    app = make_app(tree)
+    async with app.run_test() as pilot:
+        app.approvals = SessionApprovals(policy)
+        app.tool_ctx.approvals = app.approvals
+        workflow = Workflow(name="demo", steps=[read(id="a"), read(id="b", needs=["a"])])
+        await drive(app, RunScreen(workflow), pilot)
+
+    first = policy.seen[0]
+    assert first.tool == "workflow" and first.action == "run"
+    assert "Nothing has run yet" in first.dry_run
+    assert "a" in first.diff and "b" in first.diff, "the plan, in the order it will run"
+
+
+async def test_a_privileged_workflow_demands_the_typed_challenge_to_run(
+    tree: Path, registry: ToolRegistry
+) -> None:
+    """Nothing in the run screen knows this rule. It goes through the one gate,
+    so it inherits the rule the rest of Altus already follows."""
+    from altus.tools.approval import RecordingPolicy, SessionApprovals
+    from altus.tui.screens.run import RunScreen
+
+    policy = RecordingPolicy()
+    app = make_app(tree)
+    async with app.run_test() as pilot:
+        app.approvals = SessionApprovals(policy)
+        app.tool_ctx.approvals = app.approvals
+        app.registry.add(_privileged_tool())
+        workflow = Workflow(name="demo", steps=[ToolStep(id="a", tool="danger_tool")])
+        await drive(app, RunScreen(workflow), pilot)
+
+    assert policy.seen[0].needs_challenge
+    assert not policy.seen[0].may_grant_always
+
+
+def _privileged_tool():  # type: ignore[no-untyped-def]
+    from altus.cloud.base import Sensitivity
+    from altus.tools.base import BaseTool, ToolOutcome
+
+    class Danger(BaseTool):
+        name = "danger_tool"
+        read_only = False
+
+        @classmethod
+        def static_sensitivity(cls) -> Sensitivity:
+            return Sensitivity.PRIVILEGED
+
+        async def run(self, args, ctx):  # type: ignore[no-untyped-def]
+            return ToolOutcome(content="done")
+
+    return Danger()
+
+
+async def test_declining_the_run_gate_runs_nothing(tree: Path) -> None:
+    from altus.tools.approval import Decision, RecordingPolicy, SessionApprovals
+    from altus.tui.screens.run import RunScreen
+
+    app = make_app(tree)
+    async with app.run_test() as pilot:
+        app.approvals = SessionApprovals(RecordingPolicy(decision=Decision.DENY))
+        app.tool_ctx.approvals = app.approvals
+        workflow = Workflow(
+            name="demo",
+            steps=[ToolStep(id="a", tool="write_file", args={"path": "o", "content": "x"})],
+        )
+        screen = RunScreen(workflow)
+        await drive(app, screen, pilot)
+
+        assert "not started" in outcome(screen)
+        assert not (tree / "o").exists()
+
+
+async def test_past_runs_are_listed_and_readable(tree: Path) -> None:
+    from altus.tui.commands import dispatch
+    from altus.tui.screens.run import RunScreen
+
+    app = make_app(tree)
+    async with app.run_test() as pilot:
+        await drive(app, RunScreen(Workflow(name="demo", steps=[read(id="a")])), pilot)
+
+        listing = await dispatch(app, app.commands, "/workflow runs")
+        assert "demo" in listing.body and "completed" in listing.body
+
+        run_id = next(word for word in listing.body.split() if word.startswith("r_"))
+        one = await dispatch(app, app.commands, f"/workflow runs {run_id}")
+        assert "a" in one.body and "read_file" in one.body
+
+
+async def test_runs_says_so_when_there_are_none() -> None:
+    from altus.config.models import Config
+    from altus.tui.app import AltusApp
+    from altus.tui.commands import dispatch
+
+    app = AltusApp(config=Config(), provider=FakeProvider())
+    async with app.run_test():
+        result = await dispatch(app, app.commands, "/workflow runs")
+        assert "No runs recorded yet" in result.body

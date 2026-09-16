@@ -26,7 +26,14 @@ from textual.widgets import Label, Static
 from altus.workflow import Workflow, blast_radius, describe, run_workflow
 from altus.workflow.engine import RunRefused
 
-MARKS = {"pending": "·", "running": "▸", "ok": "✓", "failed": "✗", "skipped": "~"}
+MARKS = {
+    "pending": "·",
+    "running": "▸",
+    "waiting": "…",
+    "ok": "✓",
+    "failed": "✗",
+    "skipped": "~",
+}
 
 
 class RunScreen(Screen[None]):
@@ -45,6 +52,7 @@ class RunScreen(Screen[None]):
     RunScreen .hint { color: $text-muted; }
     RunScreen .step { height: auto; }
     RunScreen .step-running { color: $accent; }
+    RunScreen .step-waiting { color: $warning; }
     RunScreen .step-ok { color: $success; }
     RunScreen .step-failed { color: $error; }
     RunScreen .step-skipped { color: $text-muted; }
@@ -145,9 +153,19 @@ class RunScreen(Screen[None]):
                 self._say(f"run {event.run_id}")
             case "step_started":
                 self._set(event.step, "running", event.detail or details.get(event.step, ""))
+            case "step_waiting":
+                # A step that polls CI for twenty minutes must read as waiting
+                # rather than as hung, and the count is the thing that says so.
+                self._set(
+                    event.step,
+                    "waiting",
+                    details.get(event.step, ""),
+                    f"attempt {event.attempt}, {event.elapsed:g}s — {event.detail}",
+                )
             case "step_finished":
                 state = "ok" if event.ok else "failed"
-                extra = f"{event.summary}  {event.seconds}s"
+                tries = f" over {event.attempts} attempts" if event.attempts > 1 else ""
+                extra = f"{event.summary}  {event.seconds}s{tries}"
                 self._set(event.step, state, details.get(event.step, ""), extra)
             case "step_skipped":
                 self._set(event.step, "skipped", details.get(event.step, ""), event.reason)

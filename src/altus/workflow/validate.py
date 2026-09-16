@@ -54,6 +54,7 @@ def check(workflow: Workflow, registry: Any) -> list[Problem]:
     # of confusing reference errors that vanish once the cycle is fixed.
     if not cycles:
         found += _bad_references(workflow)
+    found += _bad_waits(workflow, registry)
     return found
 
 
@@ -215,3 +216,48 @@ def _referenced(step: AgentStep | ApprovalStep | ToolStep) -> set[str]:
     if isinstance(step, AgentStep):
         return refs_in(step.prompt)
     return refs_in(step.message)
+
+
+# ---------------------------------------------------------------------- waits
+
+
+def _bad_waits(workflow: Workflow, registry: Any) -> list[Problem]:
+    """A step that polls must be a read.
+
+    Waiting means calling the same thing over and over until something is
+    true of the answer. Nothing about "check until it is done" implies anybody
+    wanted the call repeated, and on a mutation that is what it would do ---
+    so this is refused rather than warned about. Checkable before the run
+    because `sensitivity_of` answers from the tool, not from the arguments.
+    """
+    from altus.tools.base import sensitivity_of
+
+    found: list[Problem] = []
+    for step in workflow.steps:
+        if step.wait is None:
+            continue
+        if not isinstance(step, ToolStep):
+            found.append(
+                Problem(
+                    f"only a tool step can wait; this one is {_article(step.kind)} {step.kind} step",
+                    step.id,
+                )
+            )
+            continue
+        tool = registry.get(step.tool) if registry is not None else None
+        if tool is None:
+            continue  # already reported as a missing tool
+        level = sensitivity_of(tool)
+        if level.needs_approval:
+            found.append(
+                Problem(
+                    f"{step.tool} is {level.value}, and a waiting step is called "
+                    "repeatedly --- poll a read instead",
+                    step.id,
+                )
+            )
+    return found
+
+
+def _article(word: str) -> str:
+    return "an" if word[:1] in "aeiou" else "a"

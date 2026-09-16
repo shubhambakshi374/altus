@@ -18,7 +18,7 @@ from altus.core.events import MessageEnd, MessageStart, TextDelta
 from altus.core.session import Session
 from altus.core.types import StopReason, Usage
 from altus.tools.approval import AllowAll, Decision, RecordingPolicy
-from altus.tools.base import ToolContext
+from altus.tools.base import BaseTool, ToolContext, ToolOutcome
 from altus.tools.registry import ToolRegistry, default_registry
 from altus.workflow import (
     ApprovalStep,
@@ -26,12 +26,14 @@ from altus.workflow import (
     RunRefused,
     ToolStep,
     Workflow,
+    check,
+    fatal,
     order,
     read_run,
     run_workflow,
     summarise,
 )
-from altus.workflow.models import AgentStep
+from altus.workflow.models import AgentStep, Wait
 from altus.workspace import Workspace
 from tests.conftest import FakeProvider
 
@@ -584,3 +586,154 @@ async def test_runs_says_so_when_there_are_none() -> None:
     async with app.run_test():
         result = await dispatch(app, app.commands, "/workflow runs")
         assert "No runs recorded yet" in result.body
+
+
+# ------------------------------------------------------------ steps that wait
+
+
+class Polling(BaseTool):
+    """Answers with nothing until the nth call. Stands in for CI."""
+
+    name = "ci_status"
+    read_only = True
+
+    def __init__(self, ready_on: int = 3) -> None:
+        self.ready_on = ready_on
+        self.calls = 0
+
+    async def run(self, args: dict, ctx: ToolContext) -> ToolOutcome:
+        import json
+
+        self.calls += 1
+        done = self.calls >= self.ready_on
+        return ToolOutcome(
+            content=json.dumps({"run": {"id": 7, "conclusion": "success" if done else None}})
+        )
+
+
+def fake_clock():  # type: ignore[no-untyped-def]
+    """A clock that advances 45s per reading, and a sleep that records.
+
+    A twenty-minute CI wait has to be testable in no time at all, and a test
+    that actually slept would either be slow or would pin an interval nobody
+    wants pinned.
+    """
+    ticks = iter(range(0, 10_000_000, 45))
+    slept: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    return (lambda: next(ticks)), sleep, slept
+
+
+async def test_a_waiting_step_polls_until_the_key_appears(tree: Path) -> None:
+    tool = Polling(ready_on=3)
+    registry = ToolRegistry([tool])
+    now, sleep, slept = fake_clock()
+    workflow = Workflow(
+        name="ci",
+        steps=[ToolStep(id="ci", tool="ci_status", wait=Wait(until="conclusion", interval=30))],
+    )
+    events = await collect(workflow, registry, context(tree, registry), sleep=sleep, now=now)
+
+    assert [e.attempt for e in kinds(events, "step_waiting")] == [1, 2]
+    (finished,) = kinds(events, "step_finished")
+    assert finished.ok and finished.attempts == 3
+    assert tool.calls == 3
+    assert slept == [30.0, 30.0]
+
+
+async def test_the_condition_finds_a_key_nested_in_the_answer(tree: Path) -> None:
+    """The interesting field is never at the top --- a run's `conclusion` sits
+    inside the run object."""
+    assert Wait(until="conclusion").satisfied('{"run": {"conclusion": "failure"}}')
+    assert not Wait(until="conclusion").satisfied('{"run": {"conclusion": null}}')
+    assert not Wait(until="conclusion").satisfied('{"run": {}}')
+
+
+def test_a_condition_cannot_be_found_in_prose() -> None:
+    """`until` names a JSON key. Guessing at one with a regex would make it
+    mean something different depending on what the server returned."""
+    assert not Wait(until="conclusion").satisfied("conclusion: success")
+    assert Wait(contains="conclusion: success").satisfied("conclusion: success")
+
+
+def test_a_wait_needs_exactly_one_condition() -> None:
+    for bad in ({}, {"until": "x", "contains": "y"}):
+        with pytest.raises(ValueError, match="exactly one"):
+            Wait(**bad)
+
+
+async def test_a_wait_that_never_comes_true_gives_up_and_stops_the_run(
+    tree: Path,
+) -> None:
+    registry = ToolRegistry([Polling(ready_on=99)])
+    now, sleep, _ = fake_clock()
+    workflow = Workflow(
+        name="ci",
+        steps=[
+            ToolStep(id="ci", tool="ci_status", wait=Wait(until="never", interval=30, timeout=100)),
+            ToolStep(id="after", needs=["ci"], tool="ci_status"),
+        ],
+    )
+    events = await collect(workflow, registry, context(tree, registry), sleep=sleep, now=now)
+
+    (finished,) = [e for e in kinds(events, "step_finished") if e.step == "ci"]
+    assert not finished.ok
+    assert "gave up" in finished.summary
+    assert [e.step for e in kinds(events, "step_skipped")] == ["after"]
+
+
+async def test_only_a_read_may_wait(tree: Path, registry: ToolRegistry) -> None:
+    """Waiting means calling the same thing over and over. Nothing about
+    "check until it is done" implies anybody wanted a mutation repeated."""
+    workflow = Workflow(
+        name="x",
+        steps=[
+            ToolStep(
+                id="poll",
+                tool="write_file",
+                args={"path": "o", "content": "x"},
+                wait=Wait(until="done"),
+            )
+        ],
+    )
+    problems = fatal(check(workflow, registry))
+    assert problems and "poll a read instead" in problems[0].message
+    with pytest.raises(RunRefused):
+        await collect(workflow, registry, context(tree, registry))
+
+
+async def test_only_a_tool_step_may_wait(tree: Path, registry: ToolRegistry) -> None:
+    workflow = Workflow(
+        name="x", steps=[AgentStep(id="think", prompt="go", wait=Wait(contains="done"))]
+    )
+    problems = fatal(check(workflow, registry))
+    assert problems and "only a tool step can wait" in problems[0].message
+
+
+async def test_a_failing_step_is_not_retried_by_a_wait(tree: Path) -> None:
+    """A wait is not a retry. A step that failed did not produce an answer the
+    condition could be true of, and calling it again is a different feature
+    with a different set of questions."""
+
+    class Broken(BaseTool):
+        name = "broken"
+        read_only = True
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def run(self, args: dict, ctx: ToolContext) -> ToolOutcome:
+            self.calls += 1
+            return ToolOutcome.error("nope")
+
+    tool = Broken()
+    registry = ToolRegistry([tool])
+    now, sleep, _ = fake_clock()
+    workflow = Workflow(
+        name="x", steps=[ToolStep(id="a", tool="broken", wait=Wait(until="x", interval=1))]
+    )
+    await collect(workflow, registry, context(tree, registry), sleep=sleep, now=now)
+    assert tool.calls == 1

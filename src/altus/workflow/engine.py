@@ -6,6 +6,9 @@ having already shipped half an executor. All four are settled here.
 
 **How a step's output reaches the next.** ``${step}`` substitution, and nothing
 else --- see ``refs.py`` for why an expression language was the wrong trade.
+A step may also *wait*: run again until its output satisfies a condition, which
+is what "check CI has passed" and "check the PR is merged" actually mean. Only
+reads may wait, and the condition is two forms with no operators.
 
 **What happens when step 3 of 6 fails.** The run stops, and everything
 downstream is *skipped* rather than failed: a step that never ran did not fail,
@@ -52,6 +55,7 @@ from altus.workflow.events import (
     StepFinished,
     StepSkipped,
     StepStarted,
+    StepWaiting,
 )
 from altus.workflow.models import AgentStep, AnyStep, ApprovalStep, ToolStep, Workflow
 from altus.workflow.refs import substitute
@@ -127,11 +131,16 @@ async def run_workflow(
     confirm: Any = None,
     record: bool = True,
     runs_root: Path | None = None,
+    sleep: Any = None,
+    now: Any = None,
 ) -> AsyncGenerator[RunEvent]:
     """Execute ``workflow``, yielding one event per thing that happens.
 
     ``confirm`` is an async callable taking the ``RunStarted`` event and the
     workflow, returning False to refuse.
+
+    ``sleep`` and ``now`` exist so a test can drive a twenty-minute CI wait in
+    no time at all. Nothing else should pass them.
 
     The engine writes its own record rather than taking one, because the
     consumer cannot be trusted to write the line that matters most: a run is
@@ -148,9 +157,11 @@ async def run_workflow(
             + "\n".join(problem.render() for problem in problems)
         )
 
+    sleep = sleep or asyncio.sleep
+    now = now or time.monotonic
     steps = order(workflow)
     state = RunState(run_id=_new_run_id())
-    began = time.monotonic()
+    began = now()
     recorder = RunRecorder(state.run_id, runs_root) if record else None
 
     started = RunStarted(
@@ -190,16 +201,37 @@ async def run_workflow(
             _record(recorder, begin)
             yield begin
 
-            clock = time.monotonic()
-            ok, summary, output, denied = await _run_step(
-                step, args, registry, ctx, provider=provider, session=session
-            )
+            clock = now()
+            attempts = 0
+            while True:
+                attempts += 1
+                ok, summary, output, denied = await _run_step(
+                    step, args, registry, ctx, provider=provider, session=session
+                )
+                if step.wait is None or not ok or step.wait.satisfied(output):
+                    break
+                elapsed = now() - clock
+                if elapsed >= step.wait.timeout:
+                    ok = False
+                    summary = f"gave up after {elapsed:.0f}s and {attempts} attempts"
+                    break
+                waiting = StepWaiting(
+                    step=step.id,
+                    attempt=attempts,
+                    elapsed=round(elapsed, 1),
+                    detail=step.wait.describe(),
+                )
+                _record(recorder, waiting)
+                yield waiting
+                await sleep(min(step.wait.interval, step.wait.timeout - elapsed))
+
             finished = StepFinished(
                 step=step.id,
                 ok=ok,
                 summary=summary,
                 output=output[:MAX_OUTPUT],
-                seconds=round(time.monotonic() - clock, 2),
+                seconds=round(now() - clock, 2),
+                attempts=attempts,
                 denied=denied,
             )
             _record(recorder, finished)
@@ -238,7 +270,7 @@ async def run_workflow(
             state="cancelled",
             ran=state.ran,
             skipped=len(state.skipped),
-            seconds=round(time.monotonic() - began, 2),
+            seconds=round(now() - began, 2),
             detail="interrupted",
         )
         _record(recorder, interrupted)
@@ -251,7 +283,7 @@ async def run_workflow(
         state=state_name,  # type: ignore[arg-type]
         ran=state.ran,
         skipped=len(state.skipped),
-        seconds=round(time.monotonic() - began, 2),
+        seconds=round(now() - began, 2),
         detail=detail,
     )
     _record(recorder, done)

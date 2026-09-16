@@ -1,0 +1,146 @@
+# grafana/mcp-grafana, from the published tools reference.
+#
+# The `alerting_manage_*` and `agento11y_manage_*` tools are listed by Grafana
+# under reads, but "manage" means they take an action argument and can write.
+# They are listed here as writes: a tool that can create an alert rule is a
+# write however its documentation groups it.
+source = "documented"
+recorded = "2026-09-16"
+reference = "https://grafana.com/docs/grafana/latest/developer-resources/mcp/reference/mcp-tools-table/"
+target_fields = ["datasourceUid", "uid"]
+
+[tools]
+# identity and access
+user_info = "read"
+list_teams = "read"
+list_users_by_org = "read"
+list_all_roles = "read"
+get_role_details = "read"
+get_role_assignments = "read"
+list_user_roles = "read"
+list_team_roles = "read"
+get_resource_permissions = "read"
+get_resource_description = "read"
+
+# dashboards and folders
+search_dashboards = "read"
+search_folders = "read"
+get_dashboard_by_uid = "read"
+get_dashboard_summary = "read"
+get_dashboard_property = "read"
+get_dashboard_panel_queries = "read"
+list_dashboard_versions = "read"
+run_panel_query = "read"
+get_panel_image = "read"
+generate_deeplink = "read"
+update_dashboard = "mutate"
+create_folder = "mutate"
+
+# datasources
+list_datasources = "read"
+get_datasource = "read"
+get_query_examples = "read"
+
+# prometheus
+query_prometheus = "read"
+query_prometheus_histogram = "read"
+list_prometheus_metric_metadata = "read"
+list_prometheus_metric_names = "read"
+list_prometheus_label_names = "read"
+list_prometheus_label_values = "read"
+
+# loki
+query_loki_logs = "read"
+query_loki_stats = "read"
+query_loki_patterns = "read"
+list_loki_label_names = "read"
+list_loki_label_values = "read"
+find_error_pattern_logs = "read"
+find_slow_requests = "read"
+
+# other datasources --- `query_sql` runs SQL the caller supplies against a
+# configured datasource, so it reads but is not a plain read.
+query_influxdb = "read"
+query_elasticsearch = "read"
+query_quickwit = "read"
+query_cloudwatch = "read"
+list_cloudwatch_namespaces = "read"
+list_cloudwatch_metrics = "read"
+list_cloudwatch_dimensions = "read"
+list_cloudwatch_dimension_values = "read"
+list_sql_databases = "read"
+list_sql_tables = "read"
+describe_sql_table = "read"
+query_sql = "sensitive_read"
+
+# pyroscope
+list_pyroscope_label_names = "read"
+list_pyroscope_label_values = "read"
+list_pyroscope_profile_types = "read"
+query_pyroscope = "read"
+
+# incidents
+list_incidents = "read"
+get_incident = "read"
+list_incident_custom_fields = "read"
+create_incident = "mutate"
+update_incident = "mutate"
+add_activity_to_incident = "mutate"
+
+# alerting and on-call
+list_oncall_schedules = "read"
+list_oncall_teams = "read"
+list_oncall_users = "read"
+get_oncall_shift = "read"
+get_current_oncall_users = "read"
+list_alert_groups = "read"
+get_alert_group = "read"
+update_alert_group = "mutate"
+alerting_manage_rules = "mutate"
+alerting_manage_routing = "mutate"
+alerting_manage_silences = "mutate"
+
+# sift and assertions
+get_sift_investigation = "read"
+get_sift_analysis = "read"
+list_sift_investigations = "read"
+get_assertions = "read"
+
+# annotations and snapshots
+get_annotations = "read"
+get_annotation_tags = "read"
+list_snapshots = "read"
+get_snapshot = "read"
+create_annotation = "mutate"
+update_annotation = "mutate"
+delete_annotation = "mutate"
+create_snapshot = "mutate"
+delete_snapshot = "mutate"
+
+# provisioning
+list_provisioning_repositories = "read"
+validate_provisioning_file = "read"
+
+# LLM observability
+agento11y_manage_conversations = "mutate"
+agento11y_manage_generations = "mutate"
+agento11y_manage_agents = "mutate"
+agento11y_manage_evaluators = "mutate"
+agento11y_manage_eval_rules = "mutate"
+agento11y_manage_eval_collections = "mutate"
+agento11y_manage_experiments = "mutate"
+agento11y_manage_test_suites = "mutate"
+ask_assistant = "mutate"
+
+# docs
+search_docs = "read"
+get_doc = "read"
+
+[before]
+update_dashboard = "get_dashboard_by_uid"
+update_incident = "get_incident"
+add_activity_to_incident = "get_incident"
+update_alert_group = "get_alert_group"
+update_annotation = "get_annotations"
+delete_annotation = "get_annotations"
+delete_snapshot = "get_snapshot"

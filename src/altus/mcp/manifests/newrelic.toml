@@ -1,0 +1,61 @@
+# newrelic/mcp-server, from the published tool reference.
+#
+# Every documented tool is a read, so there is no write path to gate here ---
+# which makes New Relic the one server where `allow_writes` changes nothing.
+# `execute_nrql_query` and `natural_language_to_nrql_query` run a query the
+# caller composes against NRDB, so they are reads that still pass the gate.
+source = "documented"
+recorded = "2026-09-16"
+reference = "https://docs.newrelic.com/docs/agentic-ai/mcp/tool-reference/"
+target_fields = ["accountId", "entityGuid"]
+
+[tools]
+# discovery
+convert_time_period_to_epoch_ms = "read"
+get_dashboard = "read"
+get_entity = "read"
+list_related_entities = "read"
+list_available_new_relic_accounts = "read"
+list_dashboards = "read"
+search_entity_with_tag = "read"
+list_metric_names = "read"
+
+# data access
+execute_nrql_query = "sensitive_read"
+natural_language_to_nrql_query = "sensitive_read"
+
+# alerts and monitoring
+list_alert_conditions = "read"
+list_alert_policies = "read"
+list_recent_issues = "read"
+search_incident = "read"
+list_synthetic_monitors = "read"
+list_synthetic_monitor_results = "read"
+get_synthetic_check_statistics = "read"
+
+# incident response
+analyze_deployment_impact = "read"
+generate_alert_insights_report = "read"
+generate_user_impact_report = "read"
+list_entity_error_groups = "read"
+list_change_events = "read"
+get_error_statistics = "read"
+search_errors = "read"
+
+# performance analytics
+analyze_entity_logs = "read"
+analyze_golden_metrics = "read"
+analyze_kafka_metrics = "read"
+analyze_threads = "read"
+analyze_transactions = "read"
+list_garbage_collection_metrics = "read"
+list_recent_logs = "read"
+list_entity_performance_risk_groups = "read"
+get_metric_statistics = "read"
+get_log_statistics = "read"
+get_distributed_trace_details = "read"
+
+# preview
+search_traces = "read"
+analyze_trace_anomaly = "read"
+analyze_service_dependencies = "read"

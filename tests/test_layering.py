@@ -15,7 +15,7 @@ import pytest
 
 import altus
 
-HEADLESS_PACKAGES = ("core", "providers", "config", "storage", "tools", "cloud", "render")
+HEADLESS_PACKAGES = ("core", "providers", "config", "storage", "tools", "cloud", "mcp", "render")
 SRC = Path(altus.__file__).parent
 
 

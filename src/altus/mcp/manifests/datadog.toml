@@ -1,0 +1,287 @@
+# Datadog's hosted MCP server --- 218 tools across 24 toolsets, from the
+# published reference.
+#
+# Two entries here are the reason the classifier treats a server's own
+# annotations as a ceiling and never a floor. Datadog labels `execute_code`
+# (runs AI-authored TypeScript in a sandbox) and
+# `datadog_remote_action_restricted_shell_run_command` (runs a shell command on
+# a host) as read-only, on the grounds that both respect the caller's existing
+# permissions. That is true and it is not the question: both take code from the
+# model and run it somewhere else, which is the definition Altus uses for
+# privileged. The classifier escalates them on the name.
+source = "documented"
+recorded = "2026-09-16"
+reference = "https://docs.datadoghq.com/mcp_server/tools/"
+target_fields = ["service", "env", "host"]
+
+[tools]
+# core
+search_datadog_events = "read"
+get_datadog_incident = "read"
+get_datadog_metric = "read"
+get_datadog_metric_context = "read"
+search_datadog_monitors = "read"
+get_datadog_trace = "read"
+search_datadog_dashboards = "read"
+get_datadog_notebook = "read"
+search_datadog_notebooks = "read"
+search_datadog_hosts = "read"
+search_datadog_incidents = "read"
+search_datadog_metrics = "read"
+search_datadog_entities = "read"
+search_datadog_spans = "read"
+analyze_datadog_logs = "read"
+search_datadog_logs = "read"
+search_datadog_rum_events = "read"
+aggregate_rum_events = "read"
+create_datadog_notebook = "mutate"
+edit_datadog_notebook = "mutate"
+
+# alerting
+validate_datadog_monitor = "read"
+get_datadog_monitor_templates = "read"
+search_datadog_monitor_groups = "read"
+search_datadog_slos = "read"
+get_monitor_coverage = "read"
+create_datadog_monitor = "mutate"
+
+# apm
+apm_search_spans = "read"
+apm_query_trace = "read"
+apm_discover_span_tags = "read"
+apm_get_primary_tag_keys = "read"
+apm_search_watchdog_stories = "read"
+apm_get_watchdog_story = "read"
+apm_latency_bottleneck_summary = "read"
+apm_search_recommendations = "read"
+apm_get_recommendation = "read"
+get_change_stories = "read"
+semantic_search_change_stories = "read"
+
+# audit-trail
+search_audit_events = "read"
+list_audit_events = "read"
+build_audit_trail_query = "read"
+
+# cases
+search_datadog_cases = "read"
+get_datadog_case = "read"
+list_datadog_case_projects = "read"
+get_datadog_case_project = "read"
+search_datadog_users = "read"
+create_datadog_case = "mutate"
+update_datadog_case = "mutate"
+add_comment_to_datadog_case = "mutate"
+link_jira_issue_to_datadog_case = "mutate"
+
+# cost
+cost_recommendations = "read"
+
+# code-exec --- see the note at the top of this file.
+execute_code = "read"
+
+# dashboards
+get_datadog_dashboard = "read"
+get_widget_reference = "read"
+validate_dashboard_widget = "read"
+ask_widget_expert = "read"
+upsert_datadog_dashboard = "mutate"
+delete_datadog_dashboard = "mutate"
+
+# data-observability
+search_data_entities = "read"
+get_data_catalog_schema = "read"
+get_data_entity_details = "read"
+get_data_entity_hierarchy = "read"
+get_data_entity_lineage = "read"
+summarize_data_entity_lineage = "read"
+rank_data_entities_by_lineage_degree = "read"
+get_warehouse_query_history = "read"
+get_popular_warehouse_tables_by_query_frequency = "read"
+suggest_data_observability_monitor_filters = "read"
+rank_data_observability_monitor_candidates = "read"
+get_data_observability_monitor = "read"
+get_data_observability_monitor_coverage = "read"
+get_data_observability_monitor_group_statuses = "read"
+get_entity_tags = "read"
+get_entity_descriptions = "read"
+get_spark_job_health = "read"
+get_spark_sql_plan = "read"
+list_data_observability_recommendations = "read"
+get_data_observability_recommendation = "read"
+update_entity_tags = "mutate"
+update_entity_description = "mutate"
+
+# dbm
+find_datadog_database_instances = "read"
+get_datadog_database_calling_services = "read"
+get_datadog_database_explain_plans = "read"
+get_datadog_database_health_signals = "read"
+get_datadog_database_query_performance = "read"
+get_datadog_database_query_statement = "read"
+get_datadog_database_recommendations = "read"
+get_datadog_database_schemas = "read"
+optimize_datadog_database_query = "read"
+search_datadog_database_plans = "read"
+search_datadog_database_samples = "read"
+
+# ddsql --- `ddsql_run_query` runs SQL the caller supplies.
+ddsql_get_spec = "read"
+ddsql_schema_search_tables = "read"
+ddsql_schema_get_table_columns = "read"
+ddsql_schema_search_unstructured_fields = "read"
+ddsql_create_link = "read"
+ddsql_run_query = "sensitive_read"
+
+# error-tracking
+search_datadog_error_tracking_issues = "read"
+get_datadog_error_tracking_issue = "read"
+analyze_datadog_error_tracking_errors = "read"
+update_datadog_error_tracking_issue = "mutate"
+manage_datadog_error_tracking_issue_comments = "mutate"
+manage_datadog_error_tracking_issue_links = "mutate"
+
+# experiments
+list_experiments = "read"
+get_experiment = "read"
+get_experiment_diagnostics = "read"
+get_experiment_results = "read"
+explore_experiment_results = "read"
+list_experiment_segmentation_properties = "read"
+get_experiment_segmentation_property_values = "read"
+get_metric_definition = "read"
+diagnose_experiment_run_failure = "read"
+create_experiment = "mutate"
+link_feature_flag_to_experiment = "mutate"
+start_experiment = "mutate"
+conclude_experiment = "mutate"
+cancel_experiment = "mutate"
+
+# feature-flags
+list_datadog_feature_flags = "read"
+get_datadog_feature_flag = "read"
+list_datadog_feature_flag_environments = "read"
+list_datadog_feature_flag_allocations = "read"
+check_datadog_flag_implementation = "read"
+create_datadog_feature_flag = "mutate"
+update_datadog_feature_flag_environment = "mutate"
+sync_datadog_feature_flag_allocations = "mutate"
+
+# forms
+search_datadog_forms = "read"
+get_datadog_form = "read"
+get_form_definition_schema = "read"
+get_form_responses = "read"
+create_datadog_form = "mutate"
+update_datadog_form = "mutate"
+publish_datadog_form = "mutate"
+clone_datadog_form = "mutate"
+
+# kubernetes
+search_datadog_k8s_resources = "read"
+analyse_datadog_k8s_rollout = "read"
+describe_datadog_k8s_resource = "read"
+get_datadog_k8s_manifest = "read"
+
+# networks
+analyze_cloud_network_monitoring = "read"
+search_ndm_devices = "read"
+get_ndm_device = "read"
+search_ndm_interfaces = "read"
+
+# onboarding
+browser_onboarding = "read"
+devices_onboarding = "read"
+kubernetes_onboarding = "read"
+llm_observability_onboarding = "read"
+test_optimization_onboarding = "read"
+serverless_onboarding = "read"
+source_map_uploads = "read"
+
+# product-analytics
+search_product_analytics_events = "read"
+search_product_analytics_org_entities = "read"
+get_product_analytics_saved_chart = "read"
+aggregate_product_analytics_events = "read"
+run_product_analytics_journey = "read"
+run_product_analytics_pathway = "read"
+run_product_analytics_retention = "read"
+
+# profiling
+get_profiling_profile_types = "read"
+get_profiling_services = "read"
+get_profiling_runtime_ids = "read"
+get_profiling_service_insights = "read"
+explore_profiling_flame_graph = "read"
+explore_profiling_call_graph = "read"
+explore_profiling_timeline = "read"
+get_profiling_timeseries = "read"
+get_profiling_tag_names = "read"
+get_profiling_tag_values = "read"
+get_profiling_fields = "read"
+get_profiling_field_values = "read"
+
+# reference-tables
+list_reference_tables = "read"
+list_reference_table_rows = "read"
+get_reference_table_rows = "read"
+append_reference_table_rows = "mutate"
+upsert_reference_table_rows = "mutate"
+create_reference_table = "mutate"
+
+# remote-actions --- see the note at the top of this file.
+datadog_remote_action_restricted_shell_run_command = "read"
+
+# rum
+search_rum_applications = "read"
+get_rum_summary = "read"
+get_rum_insight = "read"
+get_rum_view_waterfall = "read"
+search_rum_operations = "read"
+get_rum_operation_summary = "read"
+get_rum_operation_insights = "read"
+search_rum_metrics = "read"
+search_rum_retention_filters = "read"
+create_rum_operation = "mutate"
+update_rum_operation = "mutate"
+delete_rum_operation = "mutate"
+upsert_rum_metric = "mutate"
+delete_rum_metric = "mutate"
+append_new_rum_retention_filter = "mutate"
+update_rum_retention_filter = "mutate"
+reorder_rum_retention_filters = "mutate"
+delete_rum_retention_filter = "mutate"
+
+# security
+datadog_secrets_scan = "read"
+get_datadog_security_signals_schema = "read"
+search_datadog_security_signals = "read"
+analyze_datadog_security_signals = "read"
+get_datadog_security_signal = "read"
+search_datadog_security_ioc_indicators = "read"
+update_datadog_security_signals_triage = "mutate"
+
+[before]
+edit_datadog_notebook = "get_datadog_notebook"
+upsert_datadog_dashboard = "get_datadog_dashboard"
+delete_datadog_dashboard = "get_datadog_dashboard"
+update_datadog_case = "get_datadog_case"
+add_comment_to_datadog_case = "get_datadog_case"
+link_jira_issue_to_datadog_case = "get_datadog_case"
+update_datadog_error_tracking_issue = "get_datadog_error_tracking_issue"
+manage_datadog_error_tracking_issue_comments = "get_datadog_error_tracking_issue"
+manage_datadog_error_tracking_issue_links = "get_datadog_error_tracking_issue"
+update_entity_tags = "get_entity_tags"
+update_entity_description = "get_entity_descriptions"
+update_datadog_feature_flag_environment = "get_datadog_feature_flag"
+sync_datadog_feature_flag_allocations = "list_datadog_feature_flag_allocations"
+update_datadog_form = "get_datadog_form"
+publish_datadog_form = "get_datadog_form"
+clone_datadog_form = "get_datadog_form"
+start_experiment = "get_experiment"
+conclude_experiment = "get_experiment"
+cancel_experiment = "get_experiment"
+link_feature_flag_to_experiment = "get_experiment"
+update_rum_operation = "get_rum_operation_summary"
+delete_rum_operation = "get_rum_operation_summary"
+update_datadog_security_signals_triage = "get_datadog_security_signal"

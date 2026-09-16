@@ -1,0 +1,22 @@
+# Databricks managed MCP servers.
+#
+# Like Snowflake, most tool names here are chosen by the customer rather than
+# the vendor --- but unlike Snowflake, the *endpoint* says what a tool can
+# possibly do, and that is enough to classify without a name:
+#
+#   /api/2.0/mcp/genie/<space>                  exactly the two tools below
+#   /api/2.0/mcp/vector-search/<cat>/<schema>   one index query per index,
+#                                               and nothing else exists there
+#   /api/2.0/mcp/functions/<cat>/<schema>       arbitrary SQL and Python UDFs
+#
+# `catalog.DATABRICKS_SCOPES` carries that, so an unnamed Vector Search index
+# is a read rather than a typed challenge, and an unnamed Unity Catalog
+# function is privileged because a UDF does whatever its author wrote.
+source = "documented"
+recorded = "2026-09-16"
+reference = "https://docs.databricks.com/aws/en/generative-ai/mcp/managed-mcp"
+target_fields = ["catalog", "schema", "space_id"]
+
+[tools]
+query_space = "sensitive_read"
+poll_response = "read"

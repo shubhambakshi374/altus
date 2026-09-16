@@ -28,6 +28,12 @@ SLUG = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 MAX_NAME = 64
 
+#: The ceiling on `Workflow.parallel`. Not a resource limit --- every step here
+#: is waiting on somebody else's API --- but a limit on how many approval
+#: prompts can be queued up behind one another before a person stops reading
+#: them.
+MAX_PARALLEL = 8
+
 
 def valid_slug(value: str) -> bool:
     return bool(value) and len(value) <= MAX_NAME and SLUG.match(value) is not None
@@ -196,7 +202,25 @@ class Workflow(BaseModel):
     name: str
     description: str = ""
     inputs: dict[str, Input] = Field(default_factory=dict)
+    parallel: int = 1
+    """How many steps may be in flight at once.
+
+    1 --- the default --- is one step at a time, in dependency order, which is
+    the run whose record reads like what happened. Raising it lets steps with
+    no path between them run together: two scans of different systems, three
+    test suites. It is opt-in rather than automatic because a workflow's author
+    knows whether its independent steps are *really* independent (two of them
+    writing the same file are not, and ``needs`` does not say so), and because
+    every workflow written before this existed keeps its meaning.
+    """
     steps: list[AnyStep] = Field(default_factory=list)
+
+    @field_validator("parallel")
+    @classmethod
+    def _parallel_is_sane(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("parallel must be at least 1")
+        return min(value, MAX_PARALLEL)
 
     @field_validator("inputs")
     @classmethod

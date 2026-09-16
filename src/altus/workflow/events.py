@@ -25,6 +25,11 @@ class RunStarted(BaseModel):
     steps: list[str] = Field(default_factory=list)
     """In the order the engine settled on, which is not the file's order."""
     blast: Sensitivity = Sensitivity.READ
+    parallel: int = 1
+    """How many steps this run was allowed to have in flight at once. In the
+    record because "these two happened in this order" and "these two happened
+    at the same time" are different facts about what was done, and a reader a
+    month later cannot tell them apart from timestamps alone."""
 
 
 class StepStarted(BaseModel):
@@ -33,6 +38,11 @@ class StepStarted(BaseModel):
     kind: str
     index: int
     total: int
+    wave: int = 1
+    """Which dependency frontier this step belongs to. Steps sharing a wave
+    have no path between them, so with ``parallel`` above 1 they may have been
+    running together --- and the record says so rather than implying an order
+    that did not exist."""
     detail: str = ""
     """The subject, after substitution: the tool name, the resolved prompt."""
 

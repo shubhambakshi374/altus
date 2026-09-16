@@ -31,9 +31,13 @@ gets worn down. A denial at either level stops the run.
 happens (``runs.py``), so an interrupted run leaves a readable trail rather
 than nothing.
 
-Steps run one at a time in dependency order. ``needs`` describes a DAG and the
-engine could run independent branches concurrently; it does not, because a
-sequential run is the one whose record reads like what happened.
+Steps run in dependency order, one wave at a time, and one at a time within a
+wave unless the workflow asks for more. ``needs`` describes a DAG, so the steps
+in a wave have no path between them and could run together --- but that is
+``parallel`` in the workflow file rather than a default, because the author is
+the one who knows whether two steps with no dependency edge are *really*
+independent, and because a sequential run is the one whose record reads like
+what happened.
 """
 
 from __future__ import annotations
@@ -73,6 +77,9 @@ and, for an agent step, part of a prompt somebody pays for."""
 
 MAX_AGENT_ITERATIONS = 15
 
+_DONE = object()
+"""Put on the queue when a wave's task group has closed."""
+
 
 class RunRefused(Exception):
     """The workflow was not started. Carries the reason, already phrased."""
@@ -87,6 +94,19 @@ class RunState:
     failed: set[str] = field(default_factory=set)
     skipped: set[str] = field(default_factory=set)
     ran: int = 0
+    done: set[str] = field(default_factory=set)
+    """Steps that produced a result, whatever that result was. Distinct from
+    ``ran`` because the skip loop needs names, not a count."""
+    stopped_at: str = ""
+    """The step whose failure ended the run, set by whichever failing step got
+    there first. Also the signal to every step in the same wave that has not
+    started yet: a run that is stopping does not begin anything new."""
+    stopped_by: tuple[str, bool] = ("", False)
+    """``(summary, denied)`` from that step, for the closing event."""
+
+    @property
+    def stopping(self) -> bool:
+        return bool(self.stopped_at)
 
     def blocked_by(self, step: AnyStep) -> str:
         """Which dependency stops this step, if any."""
@@ -98,15 +118,16 @@ class RunState:
         return ""
 
 
-def order(workflow: Workflow) -> list[AnyStep]:
-    """Dependency order, ties broken by the file's order.
+def waves(workflow: Workflow) -> list[list[AnyStep]]:
+    """Dependency frontiers: each list is steps with no path between them.
 
-    Deterministic on purpose: two runs of the same workflow must produce the
-    same record, or comparing two runs tells you nothing.
+    Deterministic on purpose --- ties broken by the file's order --- because
+    two runs of the same workflow must produce the same record, or comparing
+    two runs tells you nothing.
     """
     remaining = list(workflow.steps)
     done: set[str] = set()
-    ordered: list[AnyStep] = []
+    found: list[list[AnyStep]] = []
     while remaining:
         ready = [
             s
@@ -116,13 +137,18 @@ def order(workflow: Workflow) -> list[AnyStep]:
         if not ready:
             # A cycle. `check` refuses to run these, so reaching here means a
             # caller skipped validation; degrade to file order rather than spin.
-            ordered.extend(remaining)
-            return ordered
+            found.append(remaining)
+            return found
+        found.append(ready)
         for step in ready:
-            ordered.append(step)
             done.add(step.id)
             remaining.remove(step)
-    return ordered
+    return found
+
+
+def order(workflow: Workflow) -> list[AnyStep]:
+    """The same graph flattened: what a one-at-a-time run does, in order."""
+    return [step for wave in waves(workflow) for step in wave]
 
 
 async def run_workflow(
@@ -164,7 +190,8 @@ async def run_workflow(
 
     sleep = sleep or asyncio.sleep
     now = now or time.monotonic
-    steps = order(workflow)
+    frontiers = waves(workflow)
+    steps = [step for wave in frontiers for step in wave]
     state = RunState(run_id=_new_run_id())
     # Inputs seed the substitution table, so `${inputs.repo}` needs no new
     # mechanism --- it is an output that was known before the run started.
@@ -178,6 +205,7 @@ async def run_workflow(
         started=datetime.now(UTC).isoformat(timespec="seconds"),
         steps=[step.id for step in steps],
         blast=blast_radius(workflow, registry).level,
+        parallel=workflow.parallel,
     )
 
     if confirm is not None and not await confirm(started, workflow):
@@ -188,26 +216,34 @@ async def run_workflow(
 
     state_name: str = "completed"
     detail = ""
-    try:
-        for index, step in enumerate(steps, 1):
-            blocker = state.blocked_by(step)
-            if blocker:
-                state.skipped.add(step.id)
-                event = StepSkipped(step=step.id, reason=blocker)
-                _record(recorder, event)
-                yield event
-                continue
+    limit = asyncio.Semaphore(workflow.parallel)
+    ctx = _serialised(ctx) if workflow.parallel > 1 else ctx
+    position = {step.id: number for number, step in enumerate(steps, 1)}
+    queue: asyncio.Queue[Any] = asyncio.Queue()
 
+    def emit(event: Any) -> None:
+        """Record first, then hand to the consumer. Same order in both places."""
+        _record(recorder, event)
+        queue.put_nowait(event)
+
+    async def drive(step: AnyStep, wave: int) -> None:
+        """One step, start to finish, from inside its own task."""
+        async with limit:
+            if state.stopping:
+                # A step in this wave already failed in a way that stops the
+                # run. Nothing new begins; the skip loop below names this one.
+                return
             args = substitute(_subject(step), state.outputs)
-            begin = StepStarted(
-                step=step.id,
-                kind=step.kind,
-                index=index,
-                total=len(steps),
-                detail=_detail(step, args),
+            emit(
+                StepStarted(
+                    step=step.id,
+                    kind=step.kind,
+                    index=position[step.id],
+                    total=len(steps),
+                    wave=wave,
+                    detail=_detail(step, args),
+                )
             )
-            _record(recorder, begin)
-            yield begin
 
             clock = now()
             attempts = 0
@@ -223,14 +259,14 @@ async def run_workflow(
                     ok = False
                     summary = f"gave up after {elapsed:.0f}s and {attempts} attempts"
                     break
-                waiting = StepWaiting(
-                    step=step.id,
-                    attempt=attempts,
-                    elapsed=round(elapsed, 1),
-                    detail=step.wait.describe(),
+                emit(
+                    StepWaiting(
+                        step=step.id,
+                        attempt=attempts,
+                        elapsed=round(elapsed, 1),
+                        detail=step.wait.describe(),
+                    )
                 )
-                _record(recorder, waiting)
-                yield waiting
                 await sleep(min(step.wait.interval, step.wait.timeout - elapsed))
 
             finished = StepFinished(
@@ -242,28 +278,87 @@ async def run_workflow(
                 attempts=attempts,
                 denied=denied,
             )
-            _record(recorder, finished)
-            yield finished
+            emit(finished)
 
             state.ran += 1
+            state.done.add(step.id)
             state.outputs[step.id] = finished.output
             if ok:
-                continue
+                return
             state.failed.add(step.id)
             if step.on_error == "continue":
+                return
+            if not state.stopping:
+                # First failure wins. A second one arriving from a sibling task
+                # would otherwise rename the reason the run ended.
+                state.stopped_at = step.id
+                state.stopped_by = (summary, denied)
+
+    try:
+        for number, wave in enumerate(frontiers, 1):
+            pending: list[AnyStep] = []
+            for step in wave:
+                blocker = state.blocked_by(step)
+                if blocker:
+                    state.skipped.add(step.id)
+                    event = StepSkipped(step=step.id, reason=blocker)
+                    _record(recorder, event)
+                    yield event
+                    continue
+                pending.append(step)
+            if not pending:
                 continue
+
+            async def run_wave(pending: list[AnyStep] = pending, wave: int = number) -> None:
+                """The task group is entered and exited by this task and no other.
+
+                That is the whole reason this is a task rather than an `async
+                with` around the yield below: a group must be exited by the
+                task that entered it, and the generator spends most of a wave
+                suspended at a `yield` while its consumer renders.
+                """
+                try:
+                    async with asyncio.TaskGroup() as group:
+                        for step in pending:
+                            group.create_task(drive(step, wave))
+                finally:
+                    queue.put_nowait(_DONE)
+
+            driver = asyncio.create_task(run_wave())
+            try:
+                while True:
+                    event = await queue.get()
+                    if event is _DONE:
+                        break
+                    yield event
+                # Surfaces a bug in the engine itself. A step's own failure is
+                # data, not an exception, so anything arriving here is ours.
+                await driver
+            finally:
+                if not driver.done():
+                    driver.cancel()
+                    await asyncio.gather(driver, return_exceptions=True)
+
+            if state.stopping:
+                break
+
+        if state.stopping:
+            summary, denied = state.stopped_by
             state_name = "denied" if denied else "failed"
-            detail = f"{step.id}: {summary}"
-            # Everything after a stopping failure is skipped *by name*. Letting
-            # the loop fall out here instead would leave those steps in the
-            # record as neither run nor skipped, and a trail that cannot say
-            # what did not happen is not a trail.
-            for later in steps[index:]:
+            detail = f"{state.stopped_at}: {summary}"
+            # Everything a stopping failure prevented is skipped *by name*.
+            # Letting the loop simply end would leave those steps in the record
+            # as neither run nor skipped, and a trail that cannot say what did
+            # not happen is not a trail.
+            for later in steps:
+                if later.id in state.done or later.id in state.skipped:
+                    continue
                 state.skipped.add(later.id)
-                halted = StepSkipped(step=later.id, reason=f"the run stopped at {step.id}")
+                halted = StepSkipped(
+                    step=later.id, reason=f"the run stopped at {state.stopped_at}"
+                )
                 _record(recorder, halted)
                 yield halted
-            break
     except asyncio.CancelledError, GeneratorExit:
         # Both, and the difference is where the cancellation lands. A task
         # cancelled while the engine is awaiting a step gets CancelledError
@@ -296,6 +391,34 @@ async def run_workflow(
     )
     _record(recorder, done)
     yield done
+
+
+# ---------------------------------------------------------------- approvals
+
+
+class _OneAtATime:
+    """Approval prompts, strictly one after another.
+
+    Concurrency here is for waiting on other people's APIs, never for asking a
+    person two questions at once. ``SessionApprovals`` already serialises the
+    interactive path; this is for every other policy a run might be handed, and
+    it wraps rather than replaces so a standing grant still works exactly as it
+    did.
+    """
+
+    def __init__(self, delegate: Any) -> None:
+        self._delegate = delegate
+        self._lock = asyncio.Lock()
+
+    async def request(self, req: Any) -> Any:
+        async with self._lock:
+            return await self._delegate.request(req)
+
+
+def _serialised(ctx: ToolContext) -> ToolContext:
+    from dataclasses import replace
+
+    return replace(ctx, approvals=_OneAtATime(ctx.approvals))
 
 
 # ------------------------------------------------------------------ one step

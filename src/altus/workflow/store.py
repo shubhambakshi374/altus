@@ -77,6 +77,8 @@ def render(workflow: Workflow) -> str:
     payload: dict[str, Any] = {"name": workflow.name}
     if workflow.description:
         payload["description"] = workflow.description
+    if workflow.parallel != 1:
+        payload["parallel"] = workflow.parallel
     if workflow.inputs:
         # Before [[steps]]: TOML puts every table after the scalars that follow
         # it, so an `inputs` table written later would swallow the step array.

@@ -672,10 +672,31 @@ down. That question goes through the ordinary approval machinery, so a workflow
 whose blast radius is privileged demands the typed challenge without the run
 screen knowing the rule. Declining at either level stops the run.
 
-Steps run one at a time in dependency order, ties broken by the file's order.
-`needs` describes a DAG and independent branches *could* run concurrently; they
-do not, because a sequential run is the one whose record reads like what
-happened.
+### One at a time, unless the workflow says otherwise
+
+Steps run in dependency order, ties broken by the file's order, and one at a
+time by default — a sequential run is the one whose record reads like what
+happened. `parallel = 3` at the top of the file lets a *wave* — the steps with
+no path between them — run together:
+
+```toml
+name = "sweep"
+parallel = 3
+```
+
+Opt-in rather than automatic, because the author is the one who knows whether
+two steps with no dependency edge are really independent: `needs` does not say
+that both of them write the same file. Every workflow written before this
+existed keeps its meaning exactly.
+
+Two things do not change when steps run together. **Approval prompts stay
+strictly one at a time** — concurrency here is for waiting on somebody else's
+API, never for asking a person two questions at once. And a stopping failure
+lets what is already in flight finish, then skips everything that had not
+begun, by name: killing a sibling mid-mutation to honour "the run stops here"
+is worse than letting it land. The record says which steps shared a wave, so
+"these happened in this order" and "these happened at the same time" stay
+different facts.
 
 ### Every run leaves a record
 

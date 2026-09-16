@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import aclosing
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -874,3 +875,191 @@ def test_a_step_key_order_does_not_shift_under_the_reader() -> None:
     body = [line.split(" =")[0] for line in text.splitlines() if " = " in line]
     assert body == ["name", "id", "kind", "tool", "args", "wait", "on_error"]
     assert "[[steps]]" in text
+
+
+# --------------------------------------------------------------- concurrency
+
+
+class SlowTool(BaseTool):
+    """A read that takes a while, so "together" and "one after another" differ."""
+
+    name: ClassVar[str] = "slow_read"
+    description: ClassVar[str] = "waits, then answers"
+    read_only: ClassVar[bool] = True
+    input_schema: ClassVar[dict] = {"type": "object", "properties": {"delay": {"type": "number"}}}
+
+    def __init__(self) -> None:
+        self.in_flight = 0
+        self.most = 0
+
+    async def run(self, args, ctx):  # type: ignore[no-untyped-def]
+        self.in_flight += 1
+        self.most = max(self.most, self.in_flight)
+        try:
+            await asyncio.sleep(float(args.get("delay") or 0.05))
+        finally:
+            self.in_flight -= 1
+        return ToolOutcome(content="done", summary="done")
+
+
+def independent(count: int, **over) -> Workflow:  # type: ignore[no-untyped-def]
+    return Workflow(
+        name="fan",
+        steps=[ToolStep(id=f"s{n}", tool="slow_read", args={}) for n in range(1, count + 1)],
+        **over,
+    )
+
+
+async def test_waves_group_steps_with_no_path_between_them() -> None:
+    from altus.workflow.engine import waves
+
+    workflow = Workflow(
+        name="dag",
+        steps=[
+            ToolStep(id="a", tool="read_file", args={}),
+            ToolStep(id="b", tool="read_file", args={}),
+            ToolStep(id="c", tool="read_file", args={}, needs=["a", "b"]),
+        ],
+    )
+    assert [[s.id for s in wave] for wave in waves(workflow)] == [["a", "b"], ["c"]]
+
+
+async def test_parallel_runs_a_wave_together(tree: Path) -> None:
+    tool = SlowTool()
+    registry = ToolRegistry([tool])
+    events = await collect(independent(3, parallel=3), registry, context(tree, registry))
+
+    assert tool.most == 3
+    assert len(kinds(events, "step_finished")) == 3
+    assert {e.wave for e in kinds(events, "step_started")} == {1}
+
+
+async def test_one_at_a_time_is_still_one_at_a_time(tree: Path) -> None:
+    """The default has to mean today's behaviour, or every workflow written
+    before this existed quietly changed meaning."""
+    tool = SlowTool()
+    registry = ToolRegistry([tool])
+    events = await collect(independent(3), registry, context(tree, registry))
+
+    assert tool.most == 1
+    assert [e.step for e in kinds(events, "step_started")] == ["s1", "s2", "s3"]
+
+
+async def test_the_record_says_how_many_could_run_at_once(tree: Path, tmp_path: Path) -> None:
+    tool = SlowTool()
+    registry = ToolRegistry([tool])
+    events = await collect(independent(2, parallel=2), registry, context(tree, registry))
+
+    started = kinds(events, "run_started")[0]
+    assert started.parallel == 2
+
+
+async def test_a_failure_in_a_wave_lets_what_is_running_finish(tree: Path) -> None:
+    """Already in flight is not the same as not yet begun.
+
+    Killing a sibling mid-mutation to honour "the run stops here" would be
+    worse than letting it land, so a step that has started finishes; a step
+    that has not is skipped by name.
+    """
+    registry = ToolRegistry(
+        [
+            SlowTool(),
+            *default_registry(kubernetes=False, aws=False, azure=False, gcp=False, mcp=False),
+        ]
+    )
+    workflow = Workflow(
+        name="fail",
+        parallel=3,
+        steps=[
+            ToolStep(id="slow", tool="slow_read", args={}),
+            read("missing.md", id="bad"),
+            read(id="after", needs=["bad"]),
+        ],
+    )
+    events = await collect(workflow, registry, context(tree, registry))
+
+    finished = kinds(events, "run_finished")[0]
+    assert finished.state == "failed"
+    assert finished.detail.startswith("bad:")
+    assert {e.step for e in kinds(events, "step_finished")} == {"slow", "bad"}
+    assert [e.step for e in kinds(events, "step_skipped")] == ["after"]
+
+
+async def test_nothing_new_starts_once_the_run_is_stopping(tree: Path) -> None:
+    """Sequential-but-independent: three steps in one wave, the first fails.
+
+    With parallel = 1 the second and third have not begun, so they are skipped
+    by name --- exactly what a linear run has always done.
+    """
+    registry = default_registry(kubernetes=False, aws=False, azure=False, gcp=False, mcp=False)
+    workflow = Workflow(
+        name="fail",
+        steps=[read("missing.md", id="bad"), read(id="b"), read(id="c")],
+    )
+    events = await collect(workflow, registry, context(tree, registry))
+
+    assert [e.step for e in kinds(events, "step_finished")] == ["bad"]
+    assert [e.step for e in kinds(events, "step_skipped")] == ["b", "c"]
+
+
+async def test_two_steps_in_one_wave_never_prompt_at_once(tree: Path) -> None:
+    """Concurrency is for waiting on somebody else's API, not for asking a
+    person two questions simultaneously."""
+
+    class Watcher:
+        def __init__(self) -> None:
+            self.inside = 0
+            self.most = 0
+
+        async def request(self, req):  # type: ignore[no-untyped-def]
+            self.inside += 1
+            self.most = max(self.most, self.inside)
+            await asyncio.sleep(0.02)
+            self.inside -= 1
+            return Decision.ALLOW
+
+    watcher = Watcher()
+    registry = default_registry(kubernetes=False, aws=False, azure=False, gcp=False, mcp=False)
+    workflow = Workflow(
+        name="two-gates",
+        parallel=2,
+        steps=[
+            ToolStep(id="one", tool="write_file", args={"path": "a.txt", "content": "a"}),
+            ToolStep(id="two", tool="write_file", args={"path": "b.txt", "content": "b"}),
+        ],
+    )
+    await collect(workflow, registry, context(tree, registry, watcher))
+
+    assert watcher.most == 1
+
+
+async def test_cancelling_a_parallel_run_still_writes_an_ending(tree: Path, tmp_path: Path) -> None:
+    tool = SlowTool()
+    registry = ToolRegistry([tool])
+    runs = tmp_path / "runs"
+
+    async def go() -> None:
+        async with aclosing(
+            run_workflow(
+                independent(3, parallel=3),
+                registry,
+                context(tree, registry),
+                record=True,
+                runs_root=runs,
+            )
+        ) as events:
+            async for _ in events:
+                pass
+
+    task = asyncio.create_task(go())
+    await asyncio.sleep(0.02)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    run_id = sorted(p.stem for p in runs.glob("*.jsonl"))[0]
+    replay = read_run(run_id, runs)
+    assert replay[-1].type == "run_finished"
+    assert replay[-1].state == "cancelled"
+    assert replay[-1].detail == "interrupted"
+    assert "cancelled" in summarise(replay)

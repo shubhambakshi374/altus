@@ -35,6 +35,25 @@ class WorkspaceSettings(BaseModel):
     """Block credential-shaped files even inside an allowed root."""
 
 
+class ShellSettings(BaseModel):
+    """Which binaries a workflow may run, and for how long.
+
+    ``allow`` is empty by default, and an empty allowlist means the tool is
+    never registered at all --- so a session that has not opted in does not
+    merely refuse shell calls, it does not tell the model there is a shell.
+
+    A binary that is not listed is refused rather than gated. An allowlist a
+    prompt can talk past is not an allowlist, and the gate below it is there to
+    ask about *what* `make` will do, not about whether `curl` was meant.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    allow: list[str] = Field(default_factory=list)
+    """Binary names, not paths: `make`, `pytest`, `uv`, `npm`."""
+    timeout: float = 120.0
+
+
 class ToolSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -46,6 +65,8 @@ class ToolSettings(BaseModel):
     git: bool = True
     """The local git tools --- branch, commit, push, and the reads. Needed by
     any workflow that fixes something and raises a pull request."""
+    shell: ShellSettings = Field(default_factory=ShellSettings)
+    """Running a command. Off until an allowlist says otherwise."""
 
 
 class Profile(BaseModel):

@@ -160,6 +160,15 @@ extra_roots = ["/etc/nginx"]
 enabled = true
 max_iterations = 25
 max_file_bytes = 262144
+git = true
+
+[tools.shell]
+# Empty by default, and an empty list means there is no shell tool at all ---
+# not a shell tool that refuses. A binary missing from this list is refused
+# outright rather than asked about; the gate underneath asks what *this*
+# invocation will do, not whether you meant to allow curl.
+allow = ["make", "pytest", "uv", "npm"]
+timeout = 120
 ```
 
 ## Slash commands

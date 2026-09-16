@@ -307,6 +307,7 @@ def build_tool_context(
         max_file_bytes=config.tools.max_file_bytes,
         workflow_settings=config.workflow,
         registry=registry,
+        shell_settings=config.tools.shell,
     )
 
 

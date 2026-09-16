@@ -1,10 +1,12 @@
 """What a workflow is.
 
-Three step kinds, because three is what Altus can actually do today: call one
-of its registered tools, ask the model to work something out, or stop and let a
-human decide. Shell execution and parallel fan-out are deliberately absent ---
-the roadmap sequences both after the engine, and a shell step needs a sandbox
-and an approval design roughly the size of one of the clouds.
+Three step kinds, because three is what a workflow needs: call one of its
+registered tools, ask the model to work something out, or stop and let a human
+decide. There is deliberately no fourth kind for running a command --- a shell
+step is a ``tool`` step calling ``shell_run``, so it inherits validation, the
+approval gate, the run record and the blast radius rather than growing its own
+copy of each. A step kind is the wrong unit for "this is a different thing to
+call"; it is the right unit for "this is a different thing to *do*".
 
 Steps carry ``needs`` rather than relying on their order in the file. The
 engine will want a DAG, and retrofitting dependency edges later would mean

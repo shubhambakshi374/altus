@@ -609,3 +609,132 @@ async def test_starting_a_new_session_drops_the_drafting_tool() -> None:
         await screen.action_new_session()
         await pilot.pause()
         assert "workflow_save" not in app.registry
+
+
+# ------------------------------------------------------------- the text surface
+
+
+async def dispatch_command(app, text: str):  # type: ignore[no-untyped-def]
+    from altus.tui.commands import dispatch
+
+    return await dispatch(app, app.commands, text)
+
+
+async def seed(app, *workflows: Workflow) -> None:  # type: ignore[no-untyped-def]
+    for workflow in workflows:
+        save(workflow, app.config.workflow)
+
+
+async def test_list_says_where_to_start_when_there_are_none() -> None:
+    app = make_app()
+    async with app.run_test():
+        result = await dispatch_command(app, "/workflow list")
+        assert "No workflows yet" in result.body
+        assert "/workflow new" in result.body
+
+
+async def test_list_flags_a_workflow_that_cannot_run(registry: ToolRegistry) -> None:
+    """Otherwise the list quietly disagrees with /workflow validate: a broken
+    workflow of reads shows a calm "read" and nothing else."""
+    app = make_app()
+    async with app.run_test():
+        app.registry = registry  # type: ignore[assignment]
+        await seed(
+            app,
+            Workflow(name="fine", steps=[ToolStep(id="a", tool="k8s_get")]),
+            Workflow(name="broken", steps=[ToolStep(id="a", tool="gone")]),
+        )
+        body = (await dispatch_command(app, "/workflow list")).body
+        assert "broken" in body and "will not run" in body
+        assert "fine" in body
+        assert body.count("will not run") == 1
+
+
+async def test_show_prints_every_step_with_its_own_level(registry: ToolRegistry) -> None:
+    app = make_app()
+    async with app.run_test():
+        app.registry = registry  # type: ignore[assignment]
+        await seed(
+            app,
+            Workflow(
+                name="mixed",
+                steps=[
+                    ToolStep(id="look", tool="k8s_topology"),
+                    ToolStep(id="change", needs=["look"], tool="k8s_apply"),
+                ],
+            ),
+        )
+        body = (await dispatch_command(app, "/workflow show mixed")).body
+        assert "look" in body and "read" in body
+        assert "change" in body and "mutate" in body
+        assert "after look" in body
+
+
+async def test_validate_reports_a_runnable_workflow_as_runnable(
+    registry: ToolRegistry,
+) -> None:
+    app = make_app()
+    async with app.run_test():
+        app.registry = registry  # type: ignore[assignment]
+        await seed(app, Workflow(name="ok", steps=[ToolStep(id="a", tool="k8s_get")]))
+        result = await dispatch_command(app, "/workflow validate ok")
+        assert result.severity == "information"
+        assert "runnable" in result.body
+
+
+async def test_validate_distinguishes_a_warning_from_a_blocker(
+    registry: ToolRegistry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = make_app()
+    async with app.run_test():
+        app.registry = registry  # type: ignore[assignment]
+        await seed(app, Workflow(name="broken", steps=[ToolStep(id="a", tool="gone")]))
+        result = await dispatch_command(app, "/workflow validate broken")
+        assert result.severity == "error"
+        assert "cannot run as written" in result.body
+
+
+async def test_run_validates_and_then_says_plainly_that_nothing_ran(
+    registry: ToolRegistry,
+) -> None:
+    """`run` exists rather than being absent on purpose. Finding out through a
+    "no such subcommand" error teaches an author nothing."""
+    app = make_app()
+    async with app.run_test():
+        app.registry = registry  # type: ignore[assignment]
+        await seed(app, Workflow(name="ok", steps=[ToolStep(id="a", tool="k8s_get")]))
+        result = await dispatch_command(app, "/workflow run ok")
+        assert "validation passes" in result.body
+        assert "no engine yet" in result.body
+        assert "nothing was run" in result.body
+        assert result.severity == "warning"
+
+
+async def test_path_names_the_file_without_needing_it_to_exist() -> None:
+    app = make_app()
+    async with app.run_test():
+        body = (await dispatch_command(app, "/workflow path never-written")).body
+        assert body.endswith("never-written.toml")
+
+
+async def test_path_still_refuses_a_traversing_name() -> None:
+    app = make_app()
+    async with app.run_test():
+        result = await dispatch_command(app, "/workflow path ../../etc/passwd")
+        assert result.severity == "error"
+
+
+async def test_opening_one_that_does_not_exist_says_so() -> None:
+    app = make_app()
+    async with app.run_test():
+        result = await dispatch_command(app, "/workflow show nope")
+        assert result.severity == "error"
+        assert "nope" in result.body
+
+
+async def test_workflows_can_be_switched_off_entirely() -> None:
+    app = make_app()
+    async with app.run_test():
+        app.config.workflow.enabled = False
+        result = await dispatch_command(app, "/workflow list")
+        assert result.severity == "warning"

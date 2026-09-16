@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from altus.tui.commands.registry import Command, CommandRegistry, CommandResult
 
@@ -568,11 +568,126 @@ async def cmd_workflow(app: AltusApp, args: list[str]) -> CommandResult:
     if not settings.enabled:
         return CommandResult.warn("Workflows are disabled ([workflow] enabled = false).")
 
-    if args and args[0] == "new":
-        return await _draft_workflow(app, " ".join(args[1:]))
+    verb = args[0] if args else ""
+    rest = args[1:]
 
-    open_designer(app, args[0] if args else "", settings)
+    if verb == "new":
+        return await _draft_workflow(app, " ".join(rest))
+    if verb in {"list", "ls"}:
+        return _list_workflows(app)
+    if verb in {"show", "validate", "path", "run"}:
+        if not rest:
+            return CommandResult.error(f"usage: /workflow {verb} <name>")
+        return _one_workflow(app, verb, rest[0])
+
+    open_designer(app, verb, settings)
     return CommandResult.silent()
+
+
+def _load(app: AltusApp, name: str) -> Any:
+    from altus.workflow import load
+
+    return load(name, app.config.workflow)
+
+
+def _list_workflows(app: AltusApp) -> CommandResult:
+    from altus.core.errors import ConfigError
+    from altus.workflow import blast_radius, check, fatal, list_workflows, workflows_dir
+
+    names = list_workflows(app.config.workflow)
+    if not names:
+        return CommandResult(
+            f"No workflows yet in {workflows_dir(app.config.workflow)}.\n"
+            "  /workflow to design one · /workflow new <what it should do> to describe one",
+            title="Workflows",
+        )
+    rows = ["Workflows:"]
+    for name in names:
+        try:
+            workflow = _load(app, name)
+        except ConfigError as exc:
+            rows.append(f"  {name:<20} unreadable — {exc}")
+            continue
+        radius = blast_radius(workflow, app.registry)
+        count = len(workflow.steps)
+        steps = "1 step" if count == 1 else f"{count} steps"
+        # A workflow that cannot run showing a calm "read" here would be the
+        # list quietly disagreeing with /workflow validate.
+        broken = " ✗ will not run" if fatal(check(workflow, app.registry)) else ""
+        rows.append(f"  {name:<20} {steps:<10} {radius.render()}{broken}")
+    rows.append("\n  /workflow <name> to open one · /workflow show <name> to print it")
+    return CommandResult("\n".join(rows), title="Workflows")
+
+
+def _one_workflow(app: AltusApp, verb: str, name: str) -> CommandResult:
+    """show, validate, path and run --- all four over one loaded workflow."""
+    from altus.core.errors import ConfigError
+    from altus.workflow import blast_radius, check, describe, fatal, path_for, step_level
+
+    if verb == "path":
+        try:
+            return CommandResult(str(path_for(name, app.config.workflow)))
+        except ConfigError as exc:
+            return CommandResult.error(str(exc))
+
+    try:
+        workflow = _load(app, name)
+    except ConfigError as exc:
+        return CommandResult.error(str(exc))
+
+    problems = check(workflow, app.registry)
+    radius = blast_radius(workflow, app.registry)
+
+    if verb == "show":
+        rows = [f"{workflow.name}{'  —  ' + workflow.description if workflow.description else ''}"]
+        for index, step in enumerate(workflow.steps, 1):
+            level, caveat = step_level(step, app.registry)
+            shown = "?" if caveat == "unknown" else level.value
+            after = f"  after {', '.join(step.needs)}" if step.needs else ""
+            rows.append(
+                (
+                    f"  {index:>2}  {step.id:<16} {step.kind:<9} "
+                    f"{describe(step):<40} {shown:<12}{after}"
+                ).rstrip()
+            )
+        rows += ["", radius.render(), *(f"  {note}" for note in radius.notes())]
+        if problems:
+            rows += ["", "Problems:", *(problem.render() for problem in problems)]
+        rows.append("\n  /workflow validate " + name + " · /workflow path " + name)
+        return CommandResult("\n".join(rows), title=workflow.name)
+
+    if verb == "validate":
+        if not problems:
+            return CommandResult(
+                f"{name} is runnable: {len(workflow.steps)} steps, {radius.render()}."
+                + ("" if radius.certain else "\n  " + "\n  ".join(radius.notes())),
+                title=name,
+            )
+        body = "\n".join(problem.render() for problem in problems)
+        blocked = bool(fatal(problems))
+        head = f"{name} cannot run as written:" if blocked else f"{name} will run, with warnings:"
+        return CommandResult(
+            f"{head}\n{body}", severity="error" if blocked else "warning", title=name
+        )
+
+    # run --- the honest version of a feature that does not exist yet.
+    stoppers = fatal(problems)
+    lines = [
+        f"{name}: {len(workflow.steps)} steps, {radius.render()}.",
+        *(f"  {note}" for note in radius.notes()),
+    ]
+    if stoppers:
+        lines += ["", "It cannot run as written:", *(p.render() for p in stoppers)]
+    else:
+        lines.append("  validation passes: every step resolves against this session.")
+    lines += [
+        "",
+        "There is no engine yet, so nothing was run. Running a workflow needs "
+        "decisions this increment did not make: how one step's output reaches "
+        "the next, what happens when step 3 of 6 fails, and how a run is "
+        "recorded so it can be audited afterwards.",
+    ]
+    return CommandResult("\n".join(lines), severity="warning", title=name)
 
 
 async def _draft_workflow(app: AltusApp, wanted: str) -> CommandResult:
@@ -728,7 +843,7 @@ def build_registry() -> CommandRegistry:
         Command(
             "workflow",
             "Design a multi-step workflow",
-            "workflow [<name> | new <what it should do>]",
+            "workflow [<name> | new <…> | list | show <name> | validate <name> | run <name>]",
             cmd_workflow,
             aliases=("workflows",),
         ),

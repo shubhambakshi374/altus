@@ -59,24 +59,46 @@ class Blast:
         lines: list[str] = []
         if self.unresolved:
             lines.append(
-                f"{_steps(self.unresolved)} dispatch — what they actually do is "
-                "decided by their arguments, so this could be stricter when it runs"
+                _one_or_many(
+                    self.unresolved,
+                    "{names} dispatches — what it actually does is decided by its "
+                    "arguments, so this could be stricter when it runs",
+                    "{names} dispatch — what they actually do is decided by their "
+                    "arguments, so this could be stricter when they run",
+                )
             )
         if self.open_ended:
             lines.append(
-                f"{_steps(self.open_ended)} may use any tool in the session — "
-                "name tools on the step to narrow that"
+                _one_or_many(
+                    self.open_ended,
+                    "{names} may use any tool in the session — name tools on the "
+                    "step to narrow that",
+                    "{names} may use any tool in the session — name tools on those "
+                    "steps to narrow that",
+                )
             )
         if self.unknown:
             lines.append(
-                f"{_steps(self.unknown)} name a tool this session does not have, "
-                "so they contribute nothing to the level above"
+                _one_or_many(
+                    self.unknown,
+                    "{names} names a tool this session does not have, so it "
+                    "contributes nothing to the level above",
+                    "{names} name a tool this session does not have, so they "
+                    "contribute nothing to the level above",
+                )
             )
         return lines
 
     def render(self) -> str:
         head = f"blast radius: {self.level.value}"
         return head if self.certain else f"{head} (at least)"
+
+
+def _one_or_many(ids: tuple[str, ...], singular: str, plural: str) -> str:
+    """Agreement matters here. These notes are the honest half of a level
+    somebody is about to act on, and prose that reads as sloppy gets skimmed."""
+    template = singular if len(ids) == 1 else plural
+    return template.format(names=_steps(ids))
 
 
 def _steps(ids: tuple[str, ...]) -> str:

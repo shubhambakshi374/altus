@@ -12,6 +12,12 @@ from typing import Any
 
 from altus.tools.base import BaseTool
 from altus.tools.gcp.base import GcpMutatingTool, GcpTool
+from altus.tools.gcp.insight import (
+    GcpCostTool,
+    GcpInventoryTool,
+    GcpQuotasTool,
+    GcpTopologyTool,
+)
 from altus.tools.gcp.reads import (
     GcpApisTool,
     GcpAssetsTool,
@@ -33,6 +39,10 @@ def gcp_tools(settings: Any = None) -> list[BaseTool]:
         GcpCallTool(),
         GcpCanITool(),
         GcpAssetsTool(),
+        GcpInventoryTool(),
+        GcpTopologyTool(),
+        GcpCostTool(),
+        GcpQuotasTool(),
     ]
     return tools
 

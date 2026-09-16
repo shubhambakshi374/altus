@@ -528,3 +528,239 @@ def test_the_registry_leaves_gcp_out_when_it_is_not(tmp_path: Any) -> None:
     )
     native = {n for n in registry.names if n.startswith("gcp_")} - {"gcp_cli"}
     assert native == set()
+
+
+# ------------------------------------------------------------ curated views
+
+NETWORK_LINK = "https://www.googleapis.com/compute/v1/projects/demo-project/global/networks/vpc"
+SUBNET_LINK = (
+    "https://www.googleapis.com/compute/v1/projects/demo-project/regions/europe-west1"
+    "/subnetworks/web"
+)
+
+TOPOLOGY = {
+    "compute.networks.list": {
+        "items": [{"name": "vpc", "selfLink": NETWORK_LINK, "autoCreateSubnetworks": False}]
+    },
+    "compute.subnetworks.aggregatedList": {
+        "items": {
+            "regions/europe-west1": {
+                "subnetworks": [
+                    {
+                        "name": "web",
+                        "selfLink": SUBNET_LINK,
+                        "network": NETWORK_LINK,
+                        "region": ".../regions/europe-west1",
+                        "ipCidrRange": "10.0.1.0/24",
+                    }
+                ]
+            }
+        }
+    },
+    "compute.instances.aggregatedList": {
+        "items": {
+            "zones/europe-west1-b": {
+                "instances": [
+                    {
+                        "name": "web-1",
+                        "zone": ".../zones/europe-west1-b",
+                        "status": "RUNNING",
+                        "machineType": ".../machineTypes/e2-medium",
+                        "networkInterfaces": [
+                            {"subnetwork": SUBNET_LINK, "accessConfigs": [{"natIP": "34.1.2.3"}]}
+                        ],
+                    }
+                ]
+            }
+        }
+    },
+    "compute.firewalls.list": {
+        "items": [
+            {
+                "name": "allow-ssh",
+                "network": NETWORK_LINK,
+                "allowed": [{"IPProtocol": "tcp", "ports": ["22"]}],
+            }
+        ]
+    },
+    "compute.forwardingRules.aggregatedList": {
+        "items": {
+            "regions/europe-west1": {
+                "subnetworks": [
+                    {
+                        "name": "lb",
+                        "network": NETWORK_LINK,
+                        "IPAddress": "35.1.2.3",
+                        "region": ".../regions/europe-west1",
+                    }
+                ]
+            }
+        }
+    },
+}
+
+
+async def test_inventory_prefers_the_asset_search(tmp_path: Any) -> None:
+    provider = FakeGcp(
+        {
+            "assets": {
+                "results": [
+                    {
+                        "assetType": "compute.googleapis.com/Instance",
+                        "displayName": "web-1",
+                        "location": "europe-west1-b",
+                        "state": "RUNNING",
+                    }
+                ]
+            }
+        }
+    )
+    outcome = await tool("gcp_inventory").run({}, context(tmp_path, provider))
+    assert "web-1" in outcome.content
+    assert "Cloud Asset Inventory" in outcome.content
+
+
+async def test_inventory_falls_back_and_says_that_it_did(tmp_path: Any) -> None:
+    """Reporting fewer resources without explaining why is how someone
+    concludes a thing is gone when it is only unlisted."""
+    provider = FakeGcp(
+        {
+            "compute.instances.aggregatedList": {
+                "items": {
+                    "zones/a": {
+                        "instances": [{"name": "web-1", "zone": ".../zones/a", "status": "RUNNING"}]
+                    }
+                }
+            }
+        }
+    )
+    provider.asset_error = RuntimeError("SERVICE_DISABLED")
+    outcome = await tool("gcp_inventory").run({}, context(tmp_path, provider))
+    assert "web-1" in outcome.content
+    assert "Cloud Asset unavailable" in outcome.content
+
+
+async def test_topology_builds_the_network_hierarchy(tmp_path: Any) -> None:
+    provider = FakeGcp(TOPOLOGY)
+    outcome = await tool("gcp_topology").run({}, context(tmp_path, provider))
+    graph = outcome.visual
+    assert graph is not None
+
+    kinds = {n.kind for n in graph.nodes}
+    assert kinds == {"Network", "Subnetwork", "Instance", "Firewall", "ForwardingRule"}
+    relations = {(e.relation, e.source.split("/")[0], e.target.split("/")[0]) for e in graph.edges}
+    assert ("owns", "Network", "Subnetwork") in relations
+    assert ("owns", "Subnetwork", "Instance") in relations
+    # The two that make it a graph rather than a tree.
+    assert ("secures", "Firewall", "Network") in relations
+    assert ("exposes", "ForwardingRule", "Network") in relations
+
+
+async def test_topology_marks_an_instance_reachable_from_outside(tmp_path: Any) -> None:
+    """An external IP is the thing you most want to see on a topology map, so
+    it belongs on the node rather than buried in a field."""
+    provider = FakeGcp(TOPOLOGY)
+    outcome = await tool("gcp_topology").run({}, context(tmp_path, provider))
+    assert outcome.visual is not None
+    instance = next(n for n in outcome.visual.nodes if n.kind == "Instance")
+    assert "external IP" in instance.detail
+
+
+async def test_topology_nodes_carry_a_reader(tmp_path: Any) -> None:
+    provider = FakeGcp(TOPOLOGY)
+    outcome = await tool("gcp_topology").run({}, context(tmp_path, provider))
+    assert outcome.visual is not None
+    assert {n.reader for n in outcome.visual.nodes} == {"gcp_call"}
+    for node in outcome.visual.nodes:
+        assert node.id.count("/") == 2, node.id
+
+
+async def test_cost_says_gcp_has_no_cost_api_when_nothing_is_configured(
+    tmp_path: Any,
+) -> None:
+    """The honest answer, and the one that must never be a made-up number."""
+    provider = FakeGcp(
+        {
+            "cloudbilling.projects.getBillingInfo": {"billingAccountName": "billingAccounts/X"},
+            "billingbudgets.billingAccounts.budgets.list": {
+                "budgets": [
+                    {
+                        "displayName": "monthly",
+                        "amount": {"specifiedAmount": {"units": "500", "currencyCode": "EUR"}},
+                        "thresholdRules": [{}, {}],
+                    }
+                ]
+            },
+        }
+    )
+    outcome = await tool("gcp_cost").run({}, context(tmp_path, provider))
+    assert "GCP has no cost API" in outcome.content
+    assert "billing_export_table" in outcome.content
+    assert "monthly" in outcome.content  # the budget fallback still answers
+    assert "bigquery.jobs.query" not in [m for m, _p in provider.calls]
+
+
+async def test_cost_charts_the_billing_export_when_it_is_configured(tmp_path: Any) -> None:
+    payload = {
+        "schema": {"fields": [{"name": "day"}, {"name": "service"}, {"name": "cost"}]},
+        "rows": [
+            {"f": [{"v": "2026-09-01"}, {"v": "Compute Engine"}, {"v": "12.5"}]},
+            {"f": [{"v": "2026-09-02"}, {"v": "Compute Engine"}, {"v": "13.5"}]},
+            {"f": [{"v": "2026-09-01"}, {"v": "Cloud Storage"}, {"v": "1.0"}]},
+        ],
+    }
+    provider = FakeGcp({"bigquery.jobs.query": payload})
+    settings = GcpSettings(billing_export_table="demo-project.billing.gcp_billing_export_v1_ABC")
+    outcome = await tool("gcp_cost").run({}, context(tmp_path, provider, settings=settings))
+    chart = outcome.visual
+    assert chart is not None
+    assert [s.label for s in chart.series] == ["Compute Engine", "Cloud Storage"]
+    assert chart.series[0].points == [12.5, 13.5]
+    assert chart.series[0].timed
+
+
+async def test_cost_refuses_a_table_name_that_could_break_out_of_the_query(
+    tmp_path: Any,
+) -> None:
+    """It comes from config rather than the model, but it is interpolated into
+    SQL and a name that closed the backtick would change what the query means."""
+    provider = FakeGcp()
+    settings = GcpSettings(billing_export_table="a.b.c` UNION SELECT * FROM `x.y.z")
+    outcome = await tool("gcp_cost").run({}, context(tmp_path, provider, settings=settings))
+    assert outcome.is_error
+    assert provider.calls == []
+
+
+async def test_quotas_plot_real_usage_against_the_ceiling(tmp_path: Any) -> None:
+    """GCP reports usage and limit both, as Azure does and AWS could not."""
+    provider = FakeGcp(
+        {
+            "compute.regions.get": {
+                "quotas": [
+                    {"metric": "CPUS", "usage": 90, "limit": 100},
+                    {"metric": "DISKS_TOTAL_GB", "usage": 20, "limit": 500},
+                    {"metric": "UNUSED", "usage": 0, "limit": 10},
+                ]
+            }
+        }
+    )
+    outcome = await tool("gcp_quotas").run({"region": "europe-west1"}, context(tmp_path, provider))
+    chart = outcome.visual
+    assert chart is not None
+    assert [b.value for b in chart.bars] == [90.0, 20.0]  # the unused one is dropped
+    assert chart.bars[0].limit == 100.0  # tightest first
+    assert "90%" in chart.caption
+
+
+def test_the_drill_down_knows_how_to_read_a_gcp_node() -> None:
+    from altus.tui.screens.detail import GCP_READERS, READERS, NodeDetail
+
+    assert READERS["gcp_call"] == "GCP"
+    screen = NodeDetail("Instance/europe-west1-b/web-1", "web-1", reader="gcp_call")
+    assert screen._args(("Instance", "europe-west1-b", "web-1")) == {
+        "method": "compute.instances.list",
+        "params": {"zone": "europe-west1-b"},
+    }
+    # `global` is not a zone: sending it as one is a 400.
+    assert screen._args(("Firewall", "global", "allow-ssh")) == {"method": "compute.firewalls.list"}
+    assert set(GCP_READERS) >= {"Instance", "Network", "Firewall"}

@@ -183,6 +183,7 @@ for the command you are writing.
 | `/aws` · `/aws region <name>` · `/aws profile <name>` | AWS identity, account and region |
 | `/azure` · `/azure sub <id>` | Azure tenant, subscription and identity |
 | `/gcp` · `/gcp project <id>` | GCP account, project and identity |
+| `/mcp` · `/mcp check` | MCP servers, what each covers, and drift against the manifest |
 | `/dashboard [aws \| azure \| gcp \| k8s] [<scope>]` | Several read-only views on one screen |
 | `/graphics [auto \| image \| cells \| off]` | How visuals are drawn, and why |
 | `/tools` | Tools, installed integrations, standing approvals |
@@ -334,6 +335,105 @@ and not a cent of actual spend — that lives only in a BigQuery export you
 configure yourself. Point `billing_export_table` at it and `gcp_cost` charts it;
 leave it empty and the tool says exactly that and lists your budgets instead. It
 never returns a number it did not get.
+
+## MCP — the rest of the toolchain
+
+The four clouds cover infrastructure. The systems around it — the ticket that
+explains a deploy, the dashboard that showed it failing, the warehouse the data
+landed in — have proprietary APIs with no corpus to sweep and vendor-maintained
+MCP servers already written. Altus ships seven of them kitted out. You bring
+credentials, not config files.
+
+| Server | Covers |
+|---|---|
+| `github` | Repositories, issues, pull requests, Actions, code scanning |
+| `atlassian` | Jira, Confluence, **Bitbucket Cloud**, JSM, Compass — one endpoint |
+| `grafana` | Dashboards, Prometheus, Loki, Pyroscope, incidents, on-call |
+| `datadog` | Metrics, logs, traces, monitors, incidents, security signals |
+| `newrelic` | Entities, NRQL, alerts, errors, deployment impact |
+| `snowflake` | Cortex Analyst and Search, and whatever SQL the server object allows |
+| `databricks` | Genie spaces, Vector Search indexes, Unity Catalog functions |
+
+Bitbucket is not a separate entry because it is not a separate server:
+Atlassian's hosted server carries it alongside Jira. That server is **Cloud
+only** — Jira Data Center cannot connect to it at all.
+
+**Four tools, however many servers connect.** Those seven publish well over two
+hundred tools between them, which is more schema than everything else Altus
+registers put together, so none of it sits in the prompt:
+
+| | |
+|---|---|
+| `mcp_servers` | What is reachable, what each covers, and where the manifest has drifted |
+| `mcp_tools` | Search the live inventory. The only way the model learns a tool exists |
+| `mcp_call` | Reads only — refuses anything else before contacting the server |
+| `mcp_do` | Everything that changes something, through the gate |
+
+### This is the one surface that cannot be measured offline
+
+botocore, the ARM provider manifests and the 600 GCP discovery documents all
+ship on disk, so those classifiers read a corpus. An MCP server's tool list
+lives behind an authenticated connection to a product that ships on its own
+schedule. Altus classifies against a **curated manifest** instead — 437 tool
+names as shipped — and that manifest drifts. Two rules make the drift loud
+rather than silent:
+
+**A tool absent from the manifest is privileged.** A name Altus has never seen
+is, almost by definition, a vendor release. `/mcp check` lists them.
+
+**A server's own annotations may raise a tool's sensitivity and never lower
+it.** MCP lets a server declare `readOnlyHint` and `destructiveHint`, and the
+specification says a client must not rely on those from a server it does not
+trust. Datadog is the worked example: it labels `execute_code` and
+`datadog_remote_action_restricted_shell_run_command` read-only, on the correct
+grounds that both respect the caller's permissions. Both also take code from
+the model and run it somewhere else. Altus calls them privileged.
+
+Two servers let the customer name their own tools, so a name table is
+impossible. Databricks is classified from the **endpoint** instead — a
+`vector-search/` URL exposes one index query per index and can do nothing else,
+while a `functions/` URL runs arbitrary UDFs. Snowflake's names fail closed, and
+`/mcp` says why rather than pretending the list is complete.
+
+### The preview, across all five surfaces
+
+| | Preview |
+|---|---|
+| Kubernetes | `dryRun=All` on every mutation — the server's own verdict |
+| Azure | What-If: a real property-level diff |
+| AWS | EC2 `DryRun`, 4.3% of operations |
+| GCP | `validateOnly`, 1.9% of methods |
+| **MCP** | **None. No such mechanism exists in the protocol** |
+
+So every `mcp_do` prompt contains the words *"no preview exists"*. Where the
+manifest names a read that fetches current state, the prompt shows that as the
+"before"; where it does not, it says the server declared nothing. Nothing else
+is claimed.
+
+```toml
+[mcp]
+enabled      = true
+servers      = []     # empty = whichever have credentials
+allow_writes = true   # also passes the servers' own read-only switches
+max_rows     = 200    # query results are capped and redacted
+
+[mcp.databricks]
+url   = "https://acme.cloud.databricks.com/api/2.0/mcp/{scope}"
+scope = "genie/01ef"
+```
+
+Credentials come from the environment first and the OS keyring second, never
+from `config.toml`; OAuth tokens go to the keyring too. A stdio server is handed
+`PATH` and its own credentials and nothing else — `os.environ` would give a
+third-party binary every other credential on the machine.
+
+**Snowflake and Databricks answer questions with rows**, and every row reaches
+your model provider. Results are redacted and capped at `max_rows` on the way,
+and `mcp_servers` says so out loud rather than burying it here.
+
+Only these seven. Pointing Altus at an arbitrary MCP server would mean tools
+with no manifest, every one of them failing closed to a typed challenge — which
+is how a challenge stops being read.
 
 ## Kubernetes
 
@@ -706,6 +806,7 @@ tests/         mirrors it; tests/__snapshots__ holds the TUI SVGs
 - **Phase 2c — AWS.** ✅ Inventory, VPC topology, cost, quotas, and any operation behind a gate that says what it could check.
 - **Phase 2d — Azure.** ✅ Resource Graph inventory and topology, cost, quotas, and changes behind a gate that runs a real What-If diff where one exists.
 - **Phase 2e — Google Cloud.** ✅ Asset-inventory search, VPC topology, quotas, and changes behind a gate that is honest about having almost nothing to preview.
+- **Phase 2f — MCP.** ✅ Seven vendor servers kitted out, classified against a curated manifest that fails closed, with a gate honest about having no preview at all.
 - **Phase 3 — the workflow designer.** Compose and run multi-step workflows over a shared workspace; the reason the layering above is enforced.
 - **Phase 3+ —** shell execution, then the software factory built on the workflow engine.
 

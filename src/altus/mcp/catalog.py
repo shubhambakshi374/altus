@@ -32,6 +32,7 @@ import shutil
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import Any
 
 from altus.cloud.base import Sensitivity
 
@@ -96,7 +97,11 @@ class ServerSpec:
         if self.transport is Transport.STDIO and self.command and _missing(self.command[0]):
             return f"{self.command[0]} is not on PATH"
         if self.env:
-            return f"set {' or '.join(self.env)}"
+            # Datadog wants an API key *and* an application key. Saying "or"
+            # there sends the user off to set one of two things and find it
+            # still does not work.
+            joiner = " and " if self.auth is Auth.HEADERS else " or "
+            return f"set {joiner.join(self.env)}"
         return "no credentials found"
 
 
@@ -237,3 +242,40 @@ def server_spec(server: str) -> ServerSpec | None:
 
 def available_servers() -> tuple[ServerSpec, ...]:
     return tuple(spec for spec in CATALOG if spec.available())
+
+
+def enabled_servers(settings: Any = None) -> tuple[ServerSpec, ...]:
+    """Which servers a session offers at all.
+
+    One function because there are two doors onto it --- the `mcp_servers`
+    tool and the `/mcp` command --- and two doors deciding separately is how
+    the same question gets two answers. The gcloud classifier already taught
+    that lesson once.
+
+    An explicit ``[mcp] servers`` list wins; a per-server ``enabled`` wins over
+    that; otherwise it is whichever have credentials, which is the user's
+    "if present".
+    """
+    chosen = list(getattr(settings, "servers", ()) or ())
+    out: list[ServerSpec] = []
+    for spec in CATALOG:
+        per = settings.for_server(spec.id) if settings is not None else None
+        enabled = getattr(per, "enabled", None)
+        if enabled is False:
+            continue
+        if chosen:
+            if spec.id in chosen:
+                out.append(spec)
+        elif enabled is True or spec.available():
+            out.append(spec)
+    return tuple(out)
+
+
+def why_off(spec: ServerSpec, settings: Any = None) -> str:
+    """Why a server is not on offer, in terms the user can act on."""
+    per = settings.for_server(spec.id) if settings is not None else None
+    if getattr(per, "enabled", None) is False:
+        return f"disabled in [mcp.{spec.id}]"
+    if list(getattr(settings, "servers", ()) or ()) and spec.id not in settings.servers:
+        return "not in [mcp] servers"
+    return spec.missing_hint

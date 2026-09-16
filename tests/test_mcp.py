@@ -676,3 +676,89 @@ async def test_a_server_with_no_credentials_is_not_callable() -> None:
     assert out.is_error
     assert "not enabled" in out.summary
     assert provider.calls == []
+
+
+# --- /mcp ----------------------------------------------------------------
+
+
+def test_mcp_is_listed_in_the_command_registry() -> None:
+    from altus.tui.commands.builtin import build_registry
+
+    registry = build_registry()
+    assert "mcp" in registry.commands
+    assert registry.commands["mcp"].handler is not None
+
+
+async def test_the_mcp_command_lists_every_server_and_what_is_missing() -> None:
+    """With no credentials anywhere --- which is what the test harness
+    guarantees --- every server must be reported as absent with the variable
+    to set, rather than silently omitted."""
+    from tests.test_tui import _notices, _send, make_app
+
+    app = make_app()
+    async with app.run_test() as pilot:
+        await _send(pilot, "/mcp")
+        await pilot.app.workers.wait_for_complete()
+        await pilot.pause()
+        rendered = _notices(pilot)
+    for server in SERVERS:
+        assert server in rendered
+    assert "GITHUB_PERSONAL_ACCESS_TOKEN" in rendered
+    assert "no dry-run" in rendered
+
+
+async def test_the_mcp_command_says_when_the_extra_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_tui import _notices, _send, make_app
+
+    app = make_app()
+    async with app.run_test() as pilot:
+        pilot.app.tool_ctx.cloud.mcp = None
+        await _send(pilot, "/mcp")
+        await pilot.app.workers.wait_for_complete()
+        await pilot.pause()
+        assert "uv sync --extra mcp" in _notices(pilot)
+
+
+def test_both_doors_agree_on_what_is_enabled() -> None:
+    """`/mcp` and `mcp_servers` must not answer this differently. The gcloud
+    classifier already taught that lesson once."""
+    from altus.config.models import McpServerSettings, McpSettings
+    from altus.mcp.catalog import enabled_servers as shared
+    from altus.tools.mcp.reads import McpServersTool
+
+    for settings in (
+        McpSettings(),
+        McpSettings(servers=["github", "grafana"]),
+        McpSettings(servers=["github"], github=McpServerSettings(enabled=False)),
+        McpSettings(datadog=McpServerSettings(enabled=True)),
+    ):
+        ctx = ToolContext(
+            workspace=Workspace(Path.cwd()),
+            cloud=CloudContext(mcp=FakeMcp(), mcp_settings=settings),
+        )
+        assert [s.id for s in McpServersTool().enabled_servers(ctx)] == [
+            s.id for s in shared(settings)
+        ]
+
+
+def test_datadog_is_told_it_needs_both_keys() -> None:
+    """One of a two-header pair is not partial credentials, and "or" sends the
+    user off to set one of two things and find it still does not work."""
+    spec = server_spec("datadog")
+    assert spec is not None
+    assert spec.missing_hint == "set DD_API_KEY and DD_APPLICATION_KEY"
+    github = server_spec("github")
+    assert github is not None
+    assert " or " in github.missing_hint
+
+
+def test_the_readme_count_is_the_real_count() -> None:
+    """The README cites 437 shipped manifest entries. A number in
+    documentation that nothing checks is a number that goes stale."""
+    from pathlib import Path as P
+
+    total = sum(len(manifest(server).tools) for server in SERVERS)
+    readme = (P(__file__).parent.parent / "README.md").read_text(encoding="utf-8")
+    assert f"{total} tool" in readme, f"README does not cite the real total, {total}"

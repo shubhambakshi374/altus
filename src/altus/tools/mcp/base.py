@@ -14,7 +14,7 @@ from typing import Any, ClassVar
 
 from altus.cloud.base import ProtectionMode, Sensitivity
 from altus.cloud.redact import redact, redact_text
-from altus.mcp.catalog import CATALOG, ServerSpec, server_spec
+from altus.mcp.catalog import CATALOG, ServerSpec, enabled_servers, server_spec, why_off
 from altus.mcp.classify import classify, manifest, target_for, why_unknown
 from altus.tools.base import BaseTool, ToolContext, ToolOutcome
 
@@ -42,23 +42,12 @@ class McpTool(BaseTool):
     def enabled_servers(self, ctx: ToolContext) -> list[ServerSpec]:
         """Which servers this session offers at all.
 
-        An explicit ``servers`` list wins; otherwise it is whichever have
-        credentials --- the user's "if present". A server switched off here is
-        never listed and never callable, so the model is not told it exists.
+        Shared with ``/mcp`` rather than reimplemented, so one question cannot
+        get two answers depending on which door it came through. A server that
+        is off is never listed and never callable, so the model is not told it
+        exists.
         """
-        settings = self.settings(ctx)
-        chosen = list(getattr(settings, "servers", ()) or ())
-        out: list[ServerSpec] = []
-        for spec in CATALOG:
-            per = settings.for_server(spec.id) if settings is not None else None
-            if per is not None and per.enabled is False:
-                continue
-            if chosen:
-                if spec.id in chosen:
-                    out.append(spec)
-            elif (per is not None and per.enabled is True) or spec.available():
-                out.append(spec)
-        return out
+        return list(enabled_servers(self.settings(ctx)))
 
     def resolve(self, server: str, ctx: ToolContext) -> ServerSpec | ToolOutcome:
         spec = server_spec(server)
@@ -70,7 +59,8 @@ class McpTool(BaseTool):
             )
         if spec not in self.enabled_servers(ctx):
             return ToolOutcome.error(
-                f"{server} is not enabled in this session --- {spec.missing_hint}. See /mcp.",
+                f"{server} is not enabled in this session --- "
+                f"{why_off(spec, self.settings(ctx))}. See /mcp.",
                 summary="not enabled",
             )
         return spec

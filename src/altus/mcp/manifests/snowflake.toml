@@ -18,7 +18,7 @@
 # soften its classification on that basis: the restriction lives in the server
 # object, no client can see whether it was applied, and a tool that runs
 # caller-supplied SQL against a warehouse is arbitrary execution either way.
-source = "documented"
+source = "curated"
 recorded = "2026-09-16"
 reference = "https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-agents-mcp"
 target_fields = ["database", "schema", "warehouse"]

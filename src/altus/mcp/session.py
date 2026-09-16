@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -38,6 +40,29 @@ any other host would be a code handed to somebody else."""
 
 class McpError(RuntimeError):
     """A server refused, timed out, or is not reachable from here."""
+
+
+def explain(exc: BaseException) -> str:
+    """The message a human can act on, dug out of the task group.
+
+    Both transports run inside anyio task groups, so a plain 401 arrives as
+    ``ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)`` ---
+    which says nothing at all about a bad token. Flatten to the leaves, which
+    is where the real cause is.
+    """
+    leaves: list[str] = []
+
+    def walk(item: BaseException) -> None:
+        if isinstance(item, BaseExceptionGroup):
+            for sub in item.exceptions:
+                walk(sub)
+        else:
+            text = str(item).strip()
+            leaves.append(f"{type(item).__name__}: {text}" if text else type(item).__name__)
+
+    walk(exc)
+    seen = list(dict.fromkeys(leaves))
+    return "; ".join(seen) if seen else str(exc)
 
 
 def credential(spec: ServerSpec, name: str) -> str | None:
@@ -119,8 +144,19 @@ class McpProvider:
         cached = self._tools.get(server)
         if cached is not None:
             return cached
-        async with self._session(server) as session:
-            result = await session.list_tools()
+        try:
+            async with self._session(server) as session:
+                result = await session.list_tools()
+        except McpError:
+            raise
+        except BaseException as exc:
+            # The SDK reports an HTTP failure as a JSON-RPC internal error and
+            # discards the status code, so a rejected token and a server outage
+            # are literally the same string. Say what it usually is.
+            raise McpError(
+                f"{server}: {explain(exc)}. Listing tools requires working "
+                f"credentials on most servers, so a rejected token looks like this."
+            ) from exc
         found = tuple(ToolInfo.from_mcp(tool) for tool in result.tools)
         self._tools[server] = found
         return found
@@ -133,8 +169,13 @@ class McpProvider:
 
         Whether this tool *may* be invoked was decided before we got here.
         """
-        async with self._session(server) as session:
-            result = await session.call_tool(tool, args, read_timeout_seconds=self.timeout)
+        try:
+            async with self._session(server) as session:
+                result = await session.call_tool(tool, args, read_timeout_seconds=self.timeout)
+        except McpError:
+            raise
+        except BaseException as exc:
+            raise McpError(f"{server}.{tool}: {explain(exc)}") from exc
         text = _text_of(result)
         if getattr(result, "isError", False) or getattr(result, "is_error", False):
             raise McpError(f"{server}.{tool} failed: {text}")
@@ -183,35 +224,30 @@ def _client_info() -> Any:
     return Implementation(name=CLIENT_NAME, version=CLIENT_VERSION)
 
 
-class _Session:
+@asynccontextmanager
+async def _open(transport: Any) -> AsyncIterator[Any]:
     """An open connection, for the length of one call.
 
-    Written as an explicit context manager rather than ``@asynccontextmanager``
-    so the transport and the session close in the order they were opened even
-    when the body raised.
+    This has to be a single ``async with`` chain, and an earlier version that
+    drove ``__aenter__``/``__aexit__`` by hand was wrong. Both transports wrap
+    an anyio task group, and a task group must be exited by the task that
+    entered it. Hand-driving the generator meant that on the *error* path ---
+    a bad token, a server that will not start --- cleanup was finalized by the
+    garbage collector instead, in another task, and anyio raised
+    ``RuntimeError: Attempted to exit cancel scope in a different task`` on top
+    of whatever had actually gone wrong. Reproducible on both transports, and
+    it buried the real error under a traceback about cancel scopes.
+
+    Letting ``async with`` drive it keeps entry and exit in the caller's task,
+    which is the whole requirement.
     """
+    from mcp import ClientSession
 
-    def __init__(self, transport: Any) -> None:
-        self._transport = transport
-        self._streams: Any = None
-        self._session: Any = None
-
-    async def __aenter__(self) -> Any:
-        from mcp import ClientSession
-
-        self._streams = await self._transport.__aenter__()
-        read, write = self._streams[0], self._streams[1]
-        self._session = ClientSession(read, write, client_info=_client_info())
-        await self._session.__aenter__()
-        await self._session.initialize()
-        return self._session
-
-    async def __aexit__(self, *exc: Any) -> None:
-        try:
-            if self._session is not None:
-                await self._session.__aexit__(*exc)
-        finally:
-            await self._transport.__aexit__(*exc)
+    async with transport as streams:
+        read, write = streams[0], streams[1]
+        async with ClientSession(read, write, client_info=_client_info()) as session:
+            await session.initialize()
+            yield session
 
 
 def _stdio_params(spec: ServerSpec, creds: dict[str, str]) -> Any:
@@ -231,16 +267,16 @@ def _stdio_params(spec: ServerSpec, creds: dict[str, str]) -> Any:
     )
 
 
-def _stdio_session(spec: ServerSpec, creds: dict[str, str]) -> _Session:
+def _stdio_session(spec: ServerSpec, creds: dict[str, str]) -> Any:
     from mcp.client.stdio import stdio_client
 
-    return _Session(stdio_client(_stdio_params(spec, creds)))
+    return _open(stdio_client(_stdio_params(spec, creds)))
 
 
-def _http_session(spec: ServerSpec, url: str, creds: dict[str, str]) -> _Session:
+def _http_session(spec: ServerSpec, url: str, creds: dict[str, str]) -> Any:
     from mcp.client.streamable_http import streamable_http_client
 
-    return _Session(streamable_http_client(url, http_client=_http_client(spec, url, creds)))
+    return _open(streamable_http_client(url, http_client=_http_client(spec, url, creds)))
 
 
 def _http_client(spec: ServerSpec, url: str, creds: dict[str, str]) -> Any:

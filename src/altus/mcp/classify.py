@@ -123,16 +123,34 @@ class ToolInfo:
 
 @dataclass(frozen=True)
 class Manifest:
-    """One server's curated table, as shipped."""
+    """One server's table, as shipped, and where it came from."""
 
     server: str
-    source: str = "documented"
-    """``measured`` when read off a live server, ``documented`` when built from
-    the vendor's published reference. Never conflated: one of them is evidence
-    and the other is a promise."""
+    source: str = "curated"
+    """How this table was built, and the three are never conflated:
+
+    ``derived``     generated from an upstream machine-readable artifact at a
+                    pinned ref --- evidence, and refreshable by a script.
+    ``documented``  parsed from the vendor's published tool table --- weaker,
+                    because docs lag releases and get restyled.
+    ``curated``     written by hand, because no machine-readable source exists.
+
+    The split exists so the three hand-written manifests cannot hide among the
+    generated ones.
+    """
     recorded: str = ""
     reference: str = ""
+    upstream_ref: str = ""
+    """The tag or commit the generated entries were read from."""
     tools: dict[str, Sensitivity] = field(default_factory=dict)
+    overrides: dict[str, Sensitivity] = field(default_factory=dict)
+    """Decisions a human made that regeneration must never undo.
+
+    The generator decides only whether a tool reads or writes. Everything that
+    needed judgement --- Datadog calling its remote shell tool read-only, for
+    one --- lives here, above ``tools`` in precedence, and is preserved across
+    every refresh.
+    """
     before: dict[str, str] = field(default_factory=dict)
     """Mutating tool -> the read that fetches its current state. The nearest
     thing to a preflight this surface has."""
@@ -140,7 +158,11 @@ class Manifest:
     """Argument names, in order, that locate the blast radius."""
 
     def get(self, tool: str) -> Sensitivity | None:
-        return self.tools.get(tool)
+        found = self.overrides.get(tool)
+        return found if found is not None else self.tools.get(tool)
+
+    def knows(self, tool: str) -> bool:
+        return tool in self.overrides or tool in self.tools
 
 
 @cache
@@ -151,10 +173,12 @@ def manifest(server: str) -> Manifest:
     raw = tomllib.loads(path.read_text(encoding="utf-8"))
     return Manifest(
         server=server,
-        source=str(raw.get("source", "documented")),
+        source=str(raw.get("source", "curated")),
         recorded=str(raw.get("recorded", "")),
         reference=str(raw.get("reference", "")),
+        upstream_ref=str(raw.get("upstream_ref", "")),
         tools={k: Sensitivity(v) for k, v in dict(raw.get("tools", {})).items()},
+        overrides={k: Sensitivity(v) for k, v in dict(raw.get("overrides", {})).items()},
         before=dict(raw.get("before", {})),
         target_fields=tuple(raw.get("target_fields", ())),
     )
@@ -216,7 +240,7 @@ def classify(
 
 def why_unknown(server: str, tool: str, scope: str = "") -> str:
     """The sentence a prompt uses when the manifest has never seen this tool."""
-    if manifest(server).get(tool) is not None:
+    if manifest(server).knows(tool):
         return ""
     _, reason = _unknown(server, tool, scope)
     return reason
@@ -244,7 +268,35 @@ def drift(server: str, tools: list[ToolInfo], *, scope: str = "") -> list[str]:
     return out
 
 
-def target_for(server: str, args: dict[str, Any], *, scope: str = "") -> CloudTarget:
+@dataclass(frozen=True)
+class Target:
+    """Where a call would land, and whether that could be worked out at all.
+
+    The second half is the point. An earlier version returned a bare
+    ``CloudTarget`` with empty fields when nothing matched, which meant
+    ``ProtectionRules`` matched nothing and protection silently did not fire ---
+    a fail-open, on the one control that is supposed to stop a production
+    mistake. A target that could not be resolved is now its own state, and the
+    gate treats it as protected.
+    """
+
+    target: CloudTarget
+    resolved: bool
+
+    def render(self) -> str:
+        return self.target.render() if self.resolved else f"{self.target.cloud}: (unknown)"
+
+    @property
+    def unknown_reason(self) -> str:
+        if self.resolved:
+            return ""
+        return (
+            "the blast radius of this call could not be determined from its "
+            "arguments, so it is treated as protected"
+        )
+
+
+def target_for(server: str, args: dict[str, Any], *, scope: str = "") -> Target:
     """Where this call would land.
 
     Built from the manifest's ``target_fields`` so ``ProtectionRules`` --- and
@@ -255,5 +307,9 @@ def target_for(server: str, args: dict[str, Any], *, scope: str = "") -> CloudTa
     parts = [str(args[name]) for name in fields if args.get(name) not in (None, "")]
     if scope:
         parts.append(scope)
+    resolved = bool(parts)
     parts += [""] * 3
-    return CloudTarget(cloud=server, context=parts[0], location=parts[1], scope=parts[2])
+    return Target(
+        target=CloudTarget(cloud=server, context=parts[0], location=parts[1], scope=parts[2]),
+        resolved=resolved,
+    )

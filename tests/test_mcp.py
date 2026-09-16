@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import tomllib
+from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -81,9 +82,12 @@ def test_availability_never_hits_the_network(server: str, monkeypatch: pytest.Mo
 @pytest.mark.parametrize("server", SERVERS)
 def test_manifest_loads_and_declares_its_provenance(server: str) -> None:
     table = manifest(server)
-    assert table.source in {"measured", "documented"}
+    assert table.source in {"derived", "documented", "curated"}
     assert table.recorded and table.reference
     assert table.target_fields, "without target fields a prompt cannot name the blast radius"
+    if table.source == "derived":
+        assert table.upstream_ref, "a derived table must say which ref it was read from"
+        assert table.upstream_ref != "main", "pin a release, not a moving branch"
 
 
 @pytest.mark.parametrize("server", SERVERS)
@@ -257,9 +261,10 @@ def test_no_drift_when_the_server_agrees() -> None:
 
 
 def test_target_names_the_blast_radius() -> None:
-    target = target_for("github", {"owner": "acme", "repo": "billing"})
-    assert target.cloud == "github"
-    assert target.render() == "github: acme · billing"
+    where = target_for("github", {"owner": "acme", "repo": "billing"})
+    assert where.resolved
+    assert where.target.cloud == "github"
+    assert where.render() == "github: acme · billing"
 
 
 def test_a_production_target_is_protected_with_no_new_config() -> None:
@@ -267,12 +272,19 @@ def test_a_production_target_is_protected_with_no_new_config() -> None:
     rules = ProtectionRules.build(["*prod*"], [], "confirm")
     hit = target_for("snowflake", {"database": "PROD_ANALYTICS", "schema": "public"})
     miss = target_for("snowflake", {"database": "dev_analytics", "schema": "public"})
-    assert rules.matches(hit)
-    assert not rules.matches(miss)
+    assert hit.resolved and miss.resolved
+    assert rules.matches(hit.target)
+    assert not rules.matches(miss.target)
 
 
-def test_missing_target_arguments_do_not_crash() -> None:
-    assert target_for("github", {}).render() == "github"
+def test_an_unresolvable_target_is_not_silently_unprotected() -> None:
+    """The fail-open that shipped: no argument matched, so no pattern matched,
+    so protection did not fire --- on the one control meant to stop a
+    production mistake. An unresolved target is now its own state."""
+    where = target_for("github", {})
+    assert not where.resolved
+    assert where.render() == "github: (unknown)"
+    assert "could not be determined" in where.unknown_reason
 
 
 # --- credentials and transport -------------------------------------------
@@ -762,3 +774,175 @@ def test_the_readme_count_is_the_real_count() -> None:
     total = sum(len(manifest(server).tools) for server in SERVERS)
     readme = (P(__file__).parent.parent / "README.md").read_text(encoding="utf-8")
     assert f"{total} tool" in readme, f"README does not cite the real total, {total}"
+
+
+# --- the failure path ----------------------------------------------------
+
+
+def test_explain_digs_the_real_cause_out_of_a_task_group() -> None:
+    """Both transports run inside anyio task groups, so a plain 401 arrives as
+    "unhandled errors in a TaskGroup (1 sub-exception)", which tells nobody
+    anything about a bad token."""
+    from altus.mcp.session import explain
+
+    group = ExceptionGroup("unhandled errors in a TaskGroup", [ValueError("401 Unauthorized")])
+    assert explain(group) == "ValueError: 401 Unauthorized"
+    nested = ExceptionGroup("outer", [ExceptionGroup("inner", [RuntimeError("boom")])])
+    assert explain(nested) == "RuntimeError: boom"
+    assert explain(ValueError("plain")) == "ValueError: plain"
+
+
+def test_a_connection_that_fails_midway_cleans_up_in_its_own_task() -> None:
+    """The regression for the bug that shipped.
+
+    An earlier `_Session` drove __aenter__/__aexit__ by hand. Both transports
+    wrap an anyio task group, and a task group must be exited by the task that
+    entered it --- so when a connection failed *after* opening, cleanup was
+    finalized by the garbage collector in another task and anyio raised
+    "Attempted to exit cancel scope in a different task" on top of the real
+    error, burying it.
+
+    Three details here look odd, and every one of them is why the bug survived
+    review. It needs a transport that opens and *then* fails, because a command
+    that cannot start at all unwinds cleanly --- hence a process that starts,
+    prints something that is not JSON-RPC, and exits. The failure never reaches
+    the caller, so there is nothing to assert on. And it only shows up once the
+    loop shuts down, which pytest-asyncio's loop never does mid-test --- so this
+    runs under its own `asyncio.run`, in its own interpreter, and reads stderr.
+    The in-process version of this test passed against the broken code.
+    """
+    import subprocess
+    import sys
+    import textwrap
+
+    script = textwrap.dedent("""
+        import asyncio, contextlib
+        from mcp import StdioServerParameters
+        from mcp.client.stdio import stdio_client
+        from altus.mcp.session import _open
+
+        async def main():
+            params = StdioServerParameters(command="/bin/echo", args=["not-json"], env={})
+            with contextlib.suppress(BaseException):
+                async with _open(stdio_client(params)):
+                    pass
+
+        asyncio.run(main())
+    """)
+    done = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=90
+    )
+    assert "cancel scope" not in done.stderr, (
+        f"cleanup escaped the task that opened it:\n{done.stderr[-1500:]}"
+    )
+
+
+async def test_a_call_whose_blast_radius_is_unknown_demands_a_challenge() -> None:
+    """Protection fails closed now. A call with no recognisable target could be
+    landing anywhere, which is not a reason to accept a single keypress."""
+    from altus.tools.approval import RecordingPolicy
+    from altus.tools.mcp.mutations import McpDoTool
+
+    policy = RecordingPolicy()
+    provider = FakeMcp()
+    await McpDoTool().run(
+        {"server": "github", "tool": "add_issue_comment", "arguments": {"note": "hi"}},
+        make_ctx(provider, policy=policy),
+    )
+    request = policy.seen[0]
+    assert request.protected
+    assert request.needs_challenge
+    assert not request.may_grant_always
+    assert request.target == "github: (unknown)"
+    assert "could not be determined" in request.dry_run
+
+
+async def test_a_resolvable_target_still_takes_a_keypress() -> None:
+    """The fail-closed change must not make every write a challenge."""
+    from altus.tools.approval import RecordingPolicy
+    from altus.tools.mcp.mutations import McpDoTool
+
+    policy = RecordingPolicy()
+    await McpDoTool().run(
+        {
+            "server": "github",
+            "tool": "add_issue_comment",
+            "arguments": {"owner": "acme", "repo": "billing"},
+        },
+        make_ctx(FakeMcp(), policy=policy),
+    )
+    request = policy.seen[0]
+    assert not request.protected
+    assert not request.needs_challenge
+    assert request.target == "github: acme · billing"
+
+
+# --- the generator -------------------------------------------------------
+
+
+@cache
+def _refresh_module() -> Any:
+    """Load `scripts/refresh_manifests.py`, which is dev tooling outside the
+    package --- not shipped in the wheel, so there is nothing to import."""
+    import importlib.util
+    import sys
+
+    path = Path(__file__).parent.parent / "scripts" / "refresh_manifests.py"
+    spec = importlib.util.spec_from_file_location("altus_refresh_manifests", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_derived_manifest_covers_what_the_hand_written_one_missed() -> None:
+    """The drift that prompted deriving these at all: the hand-written GitHub
+    manifest had 82 of 122 tools, so one tool in three demanded a typed
+    challenge to file an issue."""
+    table = manifest("github")
+    assert table.source == "derived"
+    assert len(table.tools) > 110
+    assert classify("github", "create_issue") is Sensitivity.MUTATE
+    assert classify("github", "search_users") is Sensitivity.READ
+    assert classify("github", "list_secret_scanning_alerts") is Sensitivity.SENSITIVE_READ
+
+
+def test_an_adapter_that_finds_nothing_is_an_error_not_an_empty_manifest() -> None:
+    """The failure that would look exactly like success. A scraper writing
+    `tools = {}` classifies every tool on that server as privileged, and a
+    green run would report it as clean."""
+    refresh = _refresh_module()
+
+    with pytest.raises(refresh.RefreshError, match="no tools at all"):
+        refresh.Generated(tools={})
+
+
+def test_overrides_survive_regeneration_and_beat_generated_entries() -> None:
+    """The generator decides only read-or-write. Anything that needed judgement
+    lives in [overrides], above [tools], and a regeneration must never undo it."""
+    refresh = _refresh_module()
+
+    made = refresh.Generated(
+        tools={"run_thing": "read"}, target_fields=("owner",), upstream_ref="v1"
+    )
+    rendered = refresh.render(
+        "demo",
+        {"overrides": {"run_thing": "privileged"}, "reference": "x", "_header": "# demo"},
+        made,
+    )
+    assert "[overrides]" in rendered
+    assert 'run_thing = "privileged"' in rendered
+    parsed = tomllib.loads(rendered)
+    assert parsed["tools"]["run_thing"] == "read"
+    assert parsed["overrides"]["run_thing"] == "privileged"
+
+
+def test_an_override_for_a_vanished_tool_stops_the_refresh() -> None:
+    """A vendor renaming something we deliberately escalated is exactly the
+    case that must not pass silently."""
+    refresh = _refresh_module()
+
+    made = refresh.Generated(tools={"still_here": "read"}, upstream_ref="v1")
+    with pytest.raises(refresh.RefreshError, match="no longer exist upstream"):
+        refresh.render("demo", {"overrides": {"gone_away": "privileged"}}, made)

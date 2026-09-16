@@ -12,7 +12,7 @@
 # `catalog.DATABRICKS_SCOPES` carries that, so an unnamed Vector Search index
 # is a read rather than a typed challenge, and an unnamed Unity Catalog
 # function is privileged because a UDF does whatever its author wrote.
-source = "documented"
+source = "curated"
 recorded = "2026-09-16"
 reference = "https://docs.databricks.com/aws/en/generative-ai/mcp/managed-mcp"
 target_fields = ["catalog", "schema", "space_id"]

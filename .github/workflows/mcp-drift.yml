@@ -1,0 +1,93 @@
+# Does upstream still match the MCP manifests Altus ships?
+#
+# Deliberately NOT part of the `check` job that gates pull requests. That job
+# makes no network calls at all, and a vendor's repository being unreachable
+# must never block a merge. This one is allowed to fail.
+name: MCP drift
+
+on:
+  schedule:
+    # Mondays, early. Frequent enough that a vendor release is noticed the same
+    # week, rare enough that nobody learns to ignore it.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --all-groups --python 3.14
+
+      - name: Compare manifests against upstream
+        id: check
+        env:
+          # Read-only, and only used to raise the anonymous API rate limit.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          uv run python scripts/refresh_manifests.py --check | tee drift.txt
+          echo "code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      # Three outcomes, never conflated. An adapter that broke is a failure of
+      # the check, not a clean run --- a scraper returning nothing looks exactly
+      # like upstream having changed nothing.
+      - name: An adapter failed
+        if: steps.check.outputs.code == '2'
+        run: |
+          echo "::error::An adapter failed. Nothing was verified --- this is not 'no drift'."
+          exit 1
+
+      - name: Report drift
+        if: steps.check.outputs.code == '1'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = [
+              'Upstream has changed since the MCP manifests were generated.',
+              '',
+              'Refresh with `uv run python scripts/refresh_manifests.py`, read the',
+              'diff, and bump the pinned ref in `scripts/refresh_manifests.py`.',
+              '',
+              'Tools that appear here classify as PRIVILEGED until the manifest',
+              'catches up, so every one of them demands a typed challenge.',
+              '',
+              '```',
+              fs.readFileSync('drift.txt', 'utf8').slice(0, 55000),
+              '```',
+            ].join('\n');
+            const title = 'MCP manifests have drifted from upstream';
+            const open = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'mcp-drift',
+            });
+            if (open.data.length > 0) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: open.data[0].number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['mcp-drift'],
+              });
+            }
+
+      - name: Clean
+        if: steps.check.outputs.code == '0'
+        run: echo "Manifests match upstream."

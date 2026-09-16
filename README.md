@@ -374,9 +374,29 @@ registers put together, so none of it sits in the prompt:
 botocore, the ARM provider manifests and the 600 GCP discovery documents all
 ship on disk, so those classifiers read a corpus. An MCP server's tool list
 lives behind an authenticated connection to a product that ships on its own
-schedule. Altus classifies against a **curated manifest** instead — 437 tool
-names as shipped — and that manifest drifts. Two rules make the drift loud
-rather than silent:
+schedule. Altus classifies against a **manifest** instead — 476 tool names as
+shipped — and it says where each one came from, because the three sources are
+not equally good:
+
+| `source` | Meaning | Servers |
+|---|---|---|
+| `derived` | Generated from an upstream machine-readable artifact at a pinned ref | github |
+| `documented` | Parsed from the vendor's published tool table | grafana, datadog, newrelic |
+| `curated` | Written by hand; no machine-readable source exists | atlassian, snowflake, databricks |
+
+GitHub is `derived` because its server checks a JSON snapshot of every tool into
+its own repository — annotations, descriptions and input schemas, generated from
+the source by its own test suite. `scripts/refresh_manifests.py` reads that at a
+pinned release and rewrites the manifest; a scheduled CI job re-runs it and
+reports drift. The hand-written version of that file, built from the published
+README, was **40 tools short of 122** — one GitHub tool in three demanded a typed
+challenge to file an issue. That is the whole argument for deriving it.
+
+The generator decides only whether a tool reads or writes. Anything that needed
+judgement lives in an `[overrides]` table it never touches, and a refresh fails
+rather than dropping an override whose tool the vendor renamed.
+
+Two rules make the remaining drift loud rather than silent:
 
 **A tool absent from the manifest is privileged.** A name Altus has never seen
 is, almost by definition, a vendor release. `/mcp check` lists them.

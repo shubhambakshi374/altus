@@ -10,9 +10,11 @@
 #
 # That is the honest state of this manifest rather than a gap to paper over:
 # guessing `createConfluencePage` and being wrong would mean a write running
-# under a read's classification. Connecting to a real site and re-recording
-# this file with source = "measured" is what fixes it.
-source = "documented"
+# under a read's classification. Atlassian publishes no machine-readable tool
+# list, so scripts/refresh_manifests.py has no adapter for this file and leaves
+# it alone --- connecting to a real site and recording what it offers is the
+# only thing that improves it.
+source = "curated"
 recorded = "2026-09-16"
 reference = "https://atlassian.github.io/atlassian-mcp-server/"
 target_fields = ["cloudId", "projectKey", "issueIdOrKey"]

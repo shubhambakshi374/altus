@@ -196,20 +196,25 @@ class McpMutatingTool(McpTool):
         """Ask. Returns an outcome when refused, None when cleared."""
         from altus.tools.approval import ApprovalRequest, Decision
 
-        target = target_for(server, args, scope=self.scope_for(server, ctx))
+        where = target_for(server, args, scope=self.scope_for(server, ctx))
         rules = ctx.cloud.protection
-        protected = bool(rules and rules.matches(target))
-        if protected and rules.mode is ProtectionMode.DENY:
+        # An unresolved target is protected. Treating it as unprotected was a
+        # fail-open on the one control meant to stop a production mistake: no
+        # argument matched, so no pattern matched, so nothing fired.
+        protected = not where.resolved or bool(rules and rules.matches(where.target))
+        if where.resolved and protected and rules and rules.mode is ProtectionMode.DENY:
             return ToolOutcome.rejected(
-                f"{target.render()} is protected with mode = deny, so this was refused "
+                f"{where.render()} is protected with mode = deny, so this was refused "
                 f"without asking."
             )
+        if not where.resolved:
+            dry_run = f"{dry_run}\n\n{where.unknown_reason}."
         decision = await ctx.approvals.request(
             ApprovalRequest(
                 tool=self.name,
                 action=self.action,
                 path=f"{server}.{tool}",
-                target=target.render(),
+                target=where.render(),
                 diff=_summarise(args),
                 dry_run=dry_run,
                 recoverability=_recoverability(server, tool),

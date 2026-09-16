@@ -119,6 +119,10 @@ def step_level(step: AnyStep, registry: Any) -> tuple[Sensitivity, str]:
         return sensitivity_of(tool), ("dispatch" if dispatches(tool) else "")
 
     assert isinstance(step, AgentStep)
+    if step.tools == []:
+        # Explicitly no tools. It can only read what earlier steps produced and
+        # write prose, which is a read however long the prompt is.
+        return Sensitivity.READ, ""
     if step.tools:
         named = [registry.get(name) for name in step.tools]
         known = [tool for tool in named if tool is not None]

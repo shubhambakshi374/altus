@@ -148,8 +148,17 @@ class AgentStep(Step):
 
     kind: Literal["agent"] = "agent"
     prompt: str
-    tools: list[str] = Field(default_factory=list)
-    """Empty means every tool the session has. Naming tools narrows it."""
+    tools: list[str] | None = None
+    """Which tools this step may use. Three states, and the difference between
+    the last two is the whole reason it is not a plain list:
+
+    ``None``   omitted --- every tool the session has, and therefore as
+               dangerous as the worst one.
+    ``[...]``  exactly these.
+    ``[]``     none at all. A step that only reads what earlier steps produced
+               and writes prose classifies as a read, which is true and which
+               nothing else could express.
+    """
 
 
 class ApprovalStep(Step):

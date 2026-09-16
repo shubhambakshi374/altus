@@ -1,0 +1,74 @@
+# A ServiceNow change record gating a deployment.
+#
+# The point of this one is the order: the change record is raised and approved
+# *before* anything is deployed, and closed with what actually happened rather
+# than with what was planned. Every ServiceNow tool here is unclassified ---
+# an instance assembles its own tool list from role-based tool packages --- so
+# each of them asks for a typed confirmation. That is the correct amount of
+# friction for writing to a change management system.
+name = "servicenow-change"
+description = "Raise a change, deploy behind its approval, and close it with the outcome"
+
+[inputs.change_description]
+description = "What is being changed, in a sentence"
+required = true
+
+[inputs.repo]
+description = "owner/name. Defaults to this checkout's origin remote."
+default = "@git.origin"
+
+[[steps]]
+id = "recent"
+kind = "tool"
+tool = "git_log"
+args = { limit = 20 }
+
+[[steps]]
+id = "raise"
+kind = "tool"
+needs = ["recent"]
+tool = "mcp_do"
+args = { server = "servicenow", tool = "create_record", arguments = { table = "change_request", short_description = "${inputs.change_description}" } }
+
+[[steps]]
+id = "approved"
+kind = "tool"
+needs = ["raise"]
+tool = "mcp_call"
+args = { server = "servicenow", tool = "get_record", arguments = { table = "change_request" } }
+wait = { until = "approval", interval = 300, timeout = 86400 }
+
+[[steps]]
+id = "go"
+kind = "approval"
+needs = ["approved"]
+message = "The change is approved in ServiceNow. Deploy now?"
+
+[[steps]]
+id = "deploy"
+kind = "tool"
+needs = ["go"]
+tool = "mcp_do"
+args = { server = "github", tool = "actions_run_trigger", arguments = { owner = "${inputs.repo}", workflow = "deploy.yml" } }
+
+[[steps]]
+id = "settled"
+kind = "tool"
+needs = ["deploy"]
+tool = "mcp_call"
+args = { server = "github", tool = "actions_list", arguments = { owner = "${inputs.repo}" } }
+wait = { until = "conclusion", interval = 30, timeout = 3600 }
+
+[[steps]]
+id = "outcome"
+kind = "agent"
+needs = ["settled", "recent"]
+prompt = "The deployment finished. Here is what CI reported:\n${settled}\n\nAnd the commits that went out:\n${recent}\n\nWrite two or three sentences for the change record's close notes: what went out, whether it succeeded, and anything that needs following up."
+tools = []
+
+[[steps]]
+id = "close"
+kind = "tool"
+needs = ["outcome"]
+tool = "mcp_do"
+args = { server = "servicenow", tool = "update_record", arguments = { table = "change_request", close_notes = "${outcome}" } }

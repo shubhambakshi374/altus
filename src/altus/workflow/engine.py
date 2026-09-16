@@ -383,10 +383,12 @@ async def _think(
             False,
         )
 
+    # None means every tool; a list means exactly those, and an empty list
+    # means none --- which is a step that can only write prose.
     narrowed = (
-        ToolRegistry([tool for tool in registry if tool.name in set(step.tools)])
-        if step.tools
-        else registry
+        registry
+        if step.tools is None
+        else ToolRegistry([tool for tool in registry if tool.name in set(step.tools)])
     )
     turn = session.model_copy(
         deep=True,

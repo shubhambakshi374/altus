@@ -23,6 +23,7 @@ from altus.core.errors import ConfigError
 from altus.workflow.models import Workflow, valid_slug
 
 SUFFIX = ".toml"
+TEMPLATES = Path(__file__).parent / "templates"
 
 #: What a step's keys look like when read top to bottom: what it is, what it
 #: waits for, then how it behaves. Anything unlisted sorts between `args` and
@@ -163,3 +164,45 @@ def delete(name: str, settings: Any = None) -> bool:
         return False
     path.unlink()
     return True
+
+
+# ------------------------------------------------------------------ templates
+
+
+def templates() -> list[str]:
+    """The workflows Altus ships as starting points."""
+    return sorted(path.stem for path in TEMPLATES.glob(f"*{SUFFIX}"))
+
+
+def template(name: str) -> Workflow:
+    """One shipped template, parsed. Raises if there is no such thing."""
+    path = TEMPLATES / f"{name}{SUFFIX}"
+    if not valid_slug(name) or not path.is_file():
+        raise ConfigError(f"no template called {name!r}. Available: {', '.join(templates())}")
+    return parse(path.read_text(encoding="utf-8"), name=name, where=str(path))
+
+
+def template_text(name: str) -> str:
+    """The file as written, comments and all --- which is most of its value."""
+    path = TEMPLATES / f"{name}{SUFFIX}"
+    if not valid_slug(name) or not path.is_file():
+        raise ConfigError(f"no template called {name!r}. Available: {', '.join(templates())}")
+    return path.read_text(encoding="utf-8")
+
+
+def copy_template(name: str, into: str, settings: Any = None) -> Path:
+    """Copy a template to a new workflow, keeping its prose.
+
+    Copied as text rather than parsed and re-rendered, because the comments
+    explaining *why* each step is there are the part a reader needs most and
+    a round trip through the model would drop every one of them.
+    """
+    text = template_text(name)
+    path = path_for(into, settings)
+    if path.exists():
+        raise ConfigError(f"{into} already exists at {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # The name lives in the file too, and the stem wins on load --- but leaving
+    # the template's name inside a copy is confusing to read.
+    path.write_text(text.replace(f'name = "{name}"', f'name = "{into}"', 1), encoding="utf-8")
+    return path

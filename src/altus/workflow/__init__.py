@@ -33,12 +33,16 @@ from altus.workflow.models import (
 from altus.workflow.refs import refs_in, substitute
 from altus.workflow.runs import RunRecorder, list_runs, read_run, runs_dir, summarise
 from altus.workflow.store import (
+    copy_template,
     list_workflows,
     load,
     parse,
     path_for,
     render,
     save,
+    template,
+    template_text,
+    templates,
     workflows_dir,
 )
 from altus.workflow.validate import Problem, check, fatal, runnable
@@ -65,6 +69,7 @@ __all__ = [
     "Workflow",
     "blast_radius",
     "check",
+    "copy_template",
     "describe",
     "fatal",
     "list_runs",
@@ -85,6 +90,9 @@ __all__ = [
     "step_level",
     "substitute",
     "summarise",
+    "template",
+    "template_text",
+    "templates",
     "valid_slug",
     "workflows_dir",
 ]

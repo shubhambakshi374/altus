@@ -1,0 +1,116 @@
+# Find what is wrong, fix it, and follow it through to merged.
+#
+# Two vulnerability sources, and the split is deliberate. GitHub's own scanning
+# answers "what is wrong in this repository" --- it knows about the code and
+# the dependency graph, and needs no mapping. CrowdStrike answers "what is
+# exploitable in what we are running", which is a different question about a
+# different artifact: Falcon's data is host- and image-centric and contains no
+# repository identifier anywhere. A workflow claiming to find "the repo's
+# vulnerabilities in CrowdStrike" would be inventing a join, so this one asks
+# both and says which it is asking.
+#
+# The CrowdStrike step is `on_error = "continue"` because plenty of repos have
+# no deployed image, and a security review of the source should not be blocked
+# by that.
+name = "vuln-fix"
+description = "Check for vulnerabilities, fix one, raise a PR, and see it merged"
+
+[inputs.repo]
+description = "owner/name. Defaults to this checkout's origin remote."
+default = "@git.origin"
+
+[inputs.image]
+description = "Container image to check in Falcon, e.g. acme/api:1.2. Optional."
+
+[[steps]]
+id = "repo_alerts"
+kind = "tool"
+tool = "mcp_call"
+args = { server = "github", tool = "list_dependabot_alerts", arguments = { owner = "${inputs.repo}", state = "open" } }
+
+[[steps]]
+id = "code_alerts"
+kind = "tool"
+tool = "mcp_call"
+args = { server = "github", tool = "list_code_scanning_alerts", arguments = { owner = "${inputs.repo}", state = "open" } }
+
+[[steps]]
+id = "runtime"
+kind = "tool"
+tool = "mcp_call"
+args = { server = "crowdstrike", tool = "falcon_search_vulnerabilities", arguments = { filter = "${inputs.image}" } }
+on_error = "continue"
+
+[[steps]]
+id = "plan"
+kind = "agent"
+needs = ["repo_alerts", "code_alerts", "runtime"]
+prompt = "Here are open Dependabot alerts:\n${repo_alerts}\n\nOpen code scanning alerts:\n${code_alerts}\n\nAnd what CrowdStrike reports as exploitable at runtime:\n${runtime}\n\nPick the single highest-priority issue, favouring anything the runtime data confirms is exposed. Read the code it affects and write a short plan: what to change, in which files, and how to tell it worked. Do not change anything yet."
+tools = ["read_file", "glob", "grep", "git_log"]
+
+[[steps]]
+id = "approve_plan"
+kind = "approval"
+needs = ["plan"]
+message = "Fix this one, along these lines?"
+
+[[steps]]
+id = "branch"
+kind = "tool"
+needs = ["approve_plan"]
+tool = "git_branch"
+args = { name = "fix/vulnerability", create = true }
+
+[[steps]]
+id = "fix"
+kind = "agent"
+needs = ["branch"]
+prompt = "Carry out this plan, editing the files it names:\n\n${plan}\n\nMake the smallest change that fixes it. Do not commit --- a later step does that."
+tools = ["read_file", "glob", "grep", "edit_file", "write_file", "git_diff"]
+
+[[steps]]
+id = "commit"
+kind = "tool"
+needs = ["fix"]
+tool = "git_commit"
+args = { message = "fix: address reported vulnerability", paths = ["."] }
+
+[[steps]]
+id = "push"
+kind = "tool"
+needs = ["commit"]
+tool = "git_push"
+args = { remote = "origin", set_upstream = true }
+
+[[steps]]
+id = "pull_request"
+kind = "tool"
+needs = ["push"]
+tool = "mcp_do"
+args = { server = "github", tool = "create_pull_request", arguments = { owner = "${inputs.repo}", head = "fix/vulnerability", base = "main", title = "fix: address reported vulnerability" } }
+
+# `actions_list` returns many runs, and `until` searches the whole output, so
+# this is satisfied by any run that has finished. Narrow it with a branch
+# filter rather than relying on there being only one.
+[[steps]]
+id = "ci"
+kind = "tool"
+needs = ["pull_request"]
+tool = "mcp_call"
+args = { server = "github", tool = "actions_list", arguments = { owner = "${inputs.repo}", branch = "fix/vulnerability" } }
+wait = { until = "conclusion", interval = 30, timeout = 1800 }
+
+[[steps]]
+id = "merged"
+kind = "tool"
+needs = ["ci"]
+tool = "mcp_call"
+args = { server = "github", tool = "pull_request_read", arguments = { owner = "${inputs.repo}" } }
+wait = { until = "merged_at", interval = 60, timeout = 86400 }
+
+[[steps]]
+id = "report"
+kind = "agent"
+needs = ["merged"]
+prompt = "The pull request is merged. Summarise in three lines what was wrong, what changed, and anything left over that somebody should pick up."
+tools = []

@@ -186,8 +186,9 @@ for the command you are writing.
 | `/mcp` · `/mcp check` | MCP servers, what each covers, and drift against the manifest |
 | `/workflow` · `/workflow <name>` | Open the workflow designer |
 | `/workflow new <what it should do>` | Describe one; the model drafts it, you approve the file |
+| `/workflow templates` · `/workflow new --from <t> [<name>]` | Start from one Altus ships |
 | `/workflow list` · `show` · `validate` · `path <name>` | The same workflows from the keyboard |
-| `/workflow run <name>` | Run one, step by step, on a screen |
+| `/workflow run <name> [k=v ...]` | Run one, step by step, on a screen |
 | `/workflow runs` · `/workflow runs <id>` | What has been run, and what happened |
 | `/dashboard [aws \| azure \| gcp \| k8s] [<scope>]` | Several read-only views on one screen |
 | `/graphics [auto \| image \| cells \| off]` | How visuals are drawn, and why |
@@ -542,6 +543,77 @@ message = "ship to staging?"
 
 One file each, under `<config>/workflows`, meant to be diffed and committed
 next to the code it operates on.
+
+### Three to start from
+
+```
+/workflow templates
+  jira-bug             11 steps   Take a Jira bug through to a merged pull request and transition it
+  servicenow-change     8 steps   Raise a change, deploy behind its approval, and close it with the outcome
+  vuln-fix             13 steps   Check for vulnerabilities, fix one, raise a PR, and see it merged
+
+/workflow new --from vuln-fix api-vulns
+```
+
+Copied as text, comments and all — the prose explaining *why* a step is there
+is the part a reader needs most, and a round trip through the parser would drop
+every line of it. Each one is checked against a real tool registry in CI: a
+template that does not validate is worse than no template, because it teaches
+the format wrong and fails at the moment somebody trusted it.
+
+`vuln-fix` asks **two** vulnerability sources, and the split is the honest
+answer to a join that does not exist. GitHub's own scanning answers *what is
+wrong in this repository* — it knows the code and the dependency graph and
+needs no mapping. CrowdStrike answers *what is exploitable in what we are
+running*, which is a different question about a different artifact: Falcon's
+data is host- and image-centric and contains no repository identifier anywhere.
+A workflow claiming to find "the repo's vulnerabilities in CrowdStrike" would
+be inventing that join.
+
+### Workflows take inputs
+
+```toml
+[inputs.repo]
+description = "owner/name"
+default     = "@git.origin"   # this checkout's own remote
+
+[inputs.image]
+description = "container image to check in Falcon"
+required    = true
+```
+
+`/workflow run vuln-fix image=acme/api:1.2`, and anything required and missing
+is asked for **before the run gate** — an approval prompt showing
+`${inputs.repo}` where the target should be is approving nothing. An input
+nobody declared is refused rather than ignored, because a misspelt `repo=` that
+quietly does nothing runs against whatever the default was.
+
+`@git.origin` is the only dynamic default there is. Each one is something that
+can resolve differently on two machines, which is exactly what stops a workflow
+file being portable.
+
+### Steps that wait
+
+"Check CI has passed" and "check the PR is merged" are steps that poll.
+
+```toml
+[steps.wait]
+until    = "conclusion"   # this key must appear, non-empty, in the output
+interval = 30
+timeout  = 1800
+```
+
+Two forms and no operators: `until` names a JSON key that must appear with a
+non-empty value, or `contains` is a literal substring. The moment it grows `!=`
+it is an expression language, and a workflow whose shape depends on run-time
+values can no longer have its blast radius worked out before it runs. Anything
+needing a *decision* is an agent step, where the gate is already watching.
+
+**Only a read may wait**, refused by the validator rather than warned about:
+waiting means calling the same thing repeatedly, and nothing about "check until
+it is done" implies anybody wanted a mutation repeated. **A wait is not a
+retry** either — a step that failed did not produce an answer the condition
+could be true of.
 
 ### Steps pass text, and only to steps they depend on
 
@@ -919,10 +991,10 @@ altus/providers   one adapter per provider, all folding onto that union
 altus/config      configuration and credential resolution
 altus/storage     JSONL session persistence
 altus/workspace   the rooted filesystem context, and its containment rules
-altus/tools       the tools, one package per surface
+altus/tools       the tools, one package per surface (git, fs, and the clouds)
 altus/cloud       Kubernetes, AWS, Azure and GCP: auth, classifiers, targets
 altus/mcp         the nine shipped MCP servers, their manifests, and the custom door
-altus/workflow    what a workflow is, where it lives, and its blast radius
+altus/workflow    what a workflow is, how it runs, and its blast radius
 altus/render      visuals, independent of the terminal drawing them
 altus/runner      one inference call
 altus/agent       the loop: inference, tool execution, repeat
@@ -1036,7 +1108,8 @@ tests/         mirrors it; tests/__snapshots__ holds the TUI SVGs
 - **Phase 2f — MCP.** ✅ Seven vendor servers kitted out, classified against a curated manifest that fails closed, with a gate honest about having no preview at all.
 - **Phase 3a — the workflow designer.** ✅ Compose multi-step workflows in a screen, in conversation or in a file, each with one honest blast radius. Headless, which is the promise the layering guard has been keeping since Phase 1.
 - **Phase 3b — the engine.** ✅ Run them: `${step}` substitution between steps, a failure that stops the run and names what it skipped, two gates, and a JSONL record written as it happens.
-- **Phase 3+ —** shell execution, then the software factory built on the workflow engine.
+- **Phase 3c — the factory floor.** ✅ CrowdStrike and ServiceNow, a `[mcp.custom]` door for the rest, local git, steps that wait, workflow inputs, and three templates that run end to end.
+- **Phase 3+ —** shell execution, triggers, and concurrency across independent branches.
 
 ## License
 

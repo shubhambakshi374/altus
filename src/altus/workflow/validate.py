@@ -147,7 +147,7 @@ def _missing_tools(workflow: Workflow, registry: Any) -> list[Problem]:
         elif isinstance(step, AgentStep):
             # A named-but-absent tool does not stop an agent step running; it
             # just runs with less than its author intended. Hence not fatal.
-            names = [(name, False) for name in step.tools]
+            names = [(name, False) for name in step.tools or ()]
         else:
             continue
         for name, required in names:

@@ -643,7 +643,11 @@ async def cmd_workflow(app: AltusApp, args: list[str]) -> CommandResult:
     rest = args[1:]
 
     if verb == "new":
+        if rest and rest[0] == "--from":
+            return _from_template(app, rest[1:])
         return await _draft_workflow(app, " ".join(rest))
+    if verb == "templates":
+        return _list_templates()
     if verb in {"list", "ls"}:
         return _list_workflows(app)
     if verb == "runs":
@@ -675,6 +679,7 @@ def _list_workflows(app: AltusApp) -> CommandResult:
     if not names:
         return CommandResult(
             f"No workflows yet in {workflows_dir(app.config.workflow)}.\n"
+            "  /workflow templates to start from one Altus ships\n"
             "  /workflow to design one · /workflow new <what it should do> to describe one",
             title="Workflows",
         )
@@ -752,6 +757,39 @@ def _one_workflow(app: AltusApp, verb: str, name: str) -> CommandResult:
     blocked = bool(fatal(problems))
     head = f"{name} cannot run as written:" if blocked else f"{name} will run, with warnings:"
     return CommandResult(f"{head}\n{body}", severity="error" if blocked else "warning", title=name)
+
+
+def _list_templates() -> CommandResult:
+    from altus.workflow import template, templates
+
+    rows = ["Templates:"]
+    for name in templates():
+        found = template(name)
+        rows.append(f"  {name:<20} {len(found.steps)} steps   {found.description}")
+    rows.append("\n  /workflow new --from <template> [<name>] to start from one")
+    return CommandResult("\n".join(rows), title="Templates")
+
+
+def _from_template(app: AltusApp, rest: list[str]) -> CommandResult:
+    """Copy a shipped workflow to edit, rather than starting from nothing."""
+    from altus.core.errors import ConfigError
+    from altus.workflow import copy_template, templates
+
+    if not rest:
+        return CommandResult.error(
+            f"usage: /workflow new --from <template> [<name>]. Available: {', '.join(templates())}"
+        )
+    source = rest[0]
+    into = rest[1] if len(rest) > 1 else source
+    try:
+        path = copy_template(source, into, app.config.workflow)
+    except ConfigError as exc:
+        return CommandResult.error(str(exc))
+    return CommandResult(
+        f"Copied {source} to {into}.\n  {path}\n\n"
+        f"  /workflow {into} to edit it · /workflow show {into} to read it",
+        title=into,
+    )
 
 
 async def _draft_workflow(app: AltusApp, wanted: str) -> CommandResult:
@@ -907,7 +945,7 @@ def build_registry() -> CommandRegistry:
         Command(
             "workflow",
             "Design a multi-step workflow",
-            "workflow [<name> | new <…> | list | show | validate | run <n> [k=v] | runs]",
+            "workflow [<name> | new | templates | list | show | validate | run | runs]",
             cmd_workflow,
             aliases=("workflows",),
         ),

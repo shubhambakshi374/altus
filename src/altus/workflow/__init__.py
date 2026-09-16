@@ -7,6 +7,15 @@ Textual to do it.
 """
 
 from altus.workflow.blast import Blast, blast_radius, step_level
+from altus.workflow.engine import RunRefused, RunState, order, run_workflow
+from altus.workflow.events import (
+    RunEvent,
+    RunFinished,
+    RunStarted,
+    StepFinished,
+    StepSkipped,
+    StepStarted,
+)
 from altus.workflow.models import (
     AgentStep,
     AnyStep,
@@ -17,6 +26,8 @@ from altus.workflow.models import (
     describe,
     valid_slug,
 )
+from altus.workflow.refs import refs_in, substitute
+from altus.workflow.runs import RunRecorder, list_runs, read_run, runs_dir, summarise
 from altus.workflow.store import (
     list_workflows,
     load,
@@ -34,21 +45,38 @@ __all__ = [
     "ApprovalStep",
     "Blast",
     "Problem",
+    "RunEvent",
+    "RunFinished",
+    "RunRecorder",
+    "RunRefused",
+    "RunStarted",
+    "RunState",
     "Step",
+    "StepFinished",
+    "StepSkipped",
+    "StepStarted",
     "ToolStep",
     "Workflow",
     "blast_radius",
     "check",
     "describe",
     "fatal",
+    "list_runs",
     "list_workflows",
     "load",
+    "order",
     "parse",
     "path_for",
+    "read_run",
+    "refs_in",
     "render",
+    "run_workflow",
     "runnable",
+    "runs_dir",
     "save",
     "step_level",
+    "substitute",
+    "summarise",
     "valid_slug",
     "workflows_dir",
 ]

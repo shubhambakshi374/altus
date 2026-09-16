@@ -36,6 +36,15 @@ class Step(BaseModel):
 
     id: str
     needs: list[str] = Field(default_factory=list)
+    on_error: Literal["stop", "continue"] = "stop"
+    """What a failure here means for the rest of the run.
+
+    ``stop`` is the default because a workflow is an ordered thing: step 4
+    usually assumes step 3 worked, and carrying on past a failure is how a
+    half-applied change gets made. ``continue`` is for the steps where it is
+    genuinely true that the rest does not depend on them --- a notification, a
+    best-effort snapshot.
+    """
 
     @field_validator("id")
     @classmethod

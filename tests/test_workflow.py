@@ -1,9 +1,9 @@
 """The workflow artifact: what it is, where it lives, and how dangerous it is.
 
-Nothing here runs a step --- there is no engine yet, and these tests are the
-guard that stops one being implied. What they do assert is that the designer
-can never overstate what it knows: every level it prints is either certain or
-carries the reason it is only a floor.
+Defining one, not running one --- ``tests/test_workflow_engine.py`` covers
+that. What these assert is that the designer can never overstate what it
+knows: every level it prints is either certain or carries the reason it is
+only a floor.
 """
 
 from __future__ import annotations
@@ -694,20 +694,26 @@ async def test_validate_distinguishes_a_warning_from_a_blocker(
         assert "cannot run as written" in result.body
 
 
-async def test_run_validates_and_then_says_plainly_that_nothing_ran(
-    registry: ToolRegistry,
-) -> None:
-    """`run` exists rather than being absent on purpose. Finding out through a
-    "no such subcommand" error teaches an author nothing."""
+async def test_run_opens_the_run_screen(registry: ToolRegistry) -> None:
+    from altus.tui.screens.run import RunScreen
+
     app = make_app()
-    async with app.run_test():
+    async with app.run_test() as pilot:
         app.registry = registry  # type: ignore[assignment]
         await seed(app, Workflow(name="ok", steps=[ToolStep(id="a", tool="k8s_get")]))
-        result = await dispatch_command(app, "/workflow run ok")
-        assert "validation passes" in result.body
-        assert "no engine yet" in result.body
-        assert "nothing was run" in result.body
-        assert result.severity == "warning"
+        await dispatch_command(app, "/workflow run ok")
+        await pilot.pause()
+
+        assert any(isinstance(screen, RunScreen) for screen in app.screen_stack)
+        # And it is already asking, before a single step has run.
+        assert type(app.screen).__name__ == "ApprovalModal"
+
+
+async def test_running_one_that_does_not_exist_says_so() -> None:
+    app = make_app()
+    async with app.run_test():
+        result = await dispatch_command(app, "/workflow run nope")
+        assert result.severity == "error"
 
 
 async def test_path_names_the_file_without_needing_it_to_exist() -> None:

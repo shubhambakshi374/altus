@@ -500,6 +500,55 @@ async def cmd_mcp(app: AltusApp, args: list[str]) -> CommandResult:
     return CommandResult("\n".join(rows))
 
 
+def _start_run(app: AltusApp, name: str) -> CommandResult:
+    """Open the run screen. Everything it needs to refuse is checked there."""
+    from altus.core.errors import ConfigError
+    from altus.tui.screens.run import RunScreen
+
+    try:
+        workflow = _load(app, name)
+    except ConfigError as exc:
+        return CommandResult.error(str(exc))
+    app.push_screen(RunScreen(workflow, settings=app.config.workflow))
+    return CommandResult.silent()
+
+
+def _past_runs(app: AltusApp, run_id: str) -> CommandResult:
+    """What has been run, and what happened --- the point of keeping a record."""
+    from altus.workflow import list_runs, read_run, runs_dir, summarise
+
+    if run_id:
+        try:
+            events = read_run(run_id)
+        except FileNotFoundError as exc:
+            return CommandResult.error(str(exc))
+        rows = [summarise(events), ""]
+        for event in events:
+            rows.append(_run_line(event))
+        return CommandResult("\n".join(row for row in rows if row), title=run_id)
+
+    ids = list_runs()
+    if not ids:
+        return CommandResult(f"No runs recorded yet in {runs_dir()}.", title="Runs")
+    rows = ["Runs, newest first:"]
+    for found in ids:
+        rows.append(f"  {found:<26} {summarise(read_run(found))}")
+    rows.append("\n  /workflow runs <id> for one of them")
+    return CommandResult("\n".join(rows), title="Runs")
+
+
+def _run_line(event: Any) -> str:
+    match event.type:
+        case "step_started":
+            return f"  ▸ {event.step:<18} {event.kind:<9} {event.detail}"
+        case "step_finished":
+            return f"    {'ok' if event.ok else 'FAILED'}: {event.summary}  ({event.seconds}s)"
+        case "step_skipped":
+            return f"  ~ {event.step:<18} skipped — {event.reason}"
+        case _:
+            return ""
+
+
 async def cmd_gcp(app: AltusApp, args: list[str]) -> CommandResult:
     """Account, project and protected status --- and switching project.
 
@@ -575,7 +624,13 @@ async def cmd_workflow(app: AltusApp, args: list[str]) -> CommandResult:
         return await _draft_workflow(app, " ".join(rest))
     if verb in {"list", "ls"}:
         return _list_workflows(app)
-    if verb in {"show", "validate", "path", "run"}:
+    if verb == "runs":
+        return _past_runs(app, rest[0] if rest else "")
+    if verb == "run":
+        if not rest:
+            return CommandResult.error("usage: /workflow run <name>")
+        return _start_run(app, rest[0])
+    if verb in {"show", "validate", "path"}:
         if not rest:
             return CommandResult.error(f"usage: /workflow {verb} <name>")
         return _one_workflow(app, verb, rest[0])
@@ -620,7 +675,7 @@ def _list_workflows(app: AltusApp) -> CommandResult:
 
 
 def _one_workflow(app: AltusApp, verb: str, name: str) -> CommandResult:
-    """show, validate, path and run --- all four over one loaded workflow."""
+    """show, validate and path over one loaded workflow. Running is a screen."""
     from altus.core.errors import ConfigError
     from altus.workflow import blast_radius, check, describe, fatal, path_for, step_level
 
@@ -656,38 +711,17 @@ def _one_workflow(app: AltusApp, verb: str, name: str) -> CommandResult:
         rows.append("\n  /workflow validate " + name + " · /workflow path " + name)
         return CommandResult("\n".join(rows), title=workflow.name)
 
-    if verb == "validate":
-        if not problems:
-            return CommandResult(
-                f"{name} is runnable: {len(workflow.steps)} steps, {radius.render()}."
-                + ("" if radius.certain else "\n  " + "\n  ".join(radius.notes())),
-                title=name,
-            )
-        body = "\n".join(problem.render() for problem in problems)
-        blocked = bool(fatal(problems))
-        head = f"{name} cannot run as written:" if blocked else f"{name} will run, with warnings:"
+    # validate
+    if not problems:
         return CommandResult(
-            f"{head}\n{body}", severity="error" if blocked else "warning", title=name
+            f"{name} is runnable: {len(workflow.steps)} steps, {radius.render()}."
+            + ("" if radius.certain else "\n  " + "\n  ".join(radius.notes())),
+            title=name,
         )
-
-    # run --- the honest version of a feature that does not exist yet.
-    stoppers = fatal(problems)
-    lines = [
-        f"{name}: {len(workflow.steps)} steps, {radius.render()}.",
-        *(f"  {note}" for note in radius.notes()),
-    ]
-    if stoppers:
-        lines += ["", "It cannot run as written:", *(p.render() for p in stoppers)]
-    else:
-        lines.append("  validation passes: every step resolves against this session.")
-    lines += [
-        "",
-        "There is no engine yet, so nothing was run. Running a workflow needs "
-        "decisions this increment did not make: how one step's output reaches "
-        "the next, what happens when step 3 of 6 fails, and how a run is "
-        "recorded so it can be audited afterwards.",
-    ]
-    return CommandResult("\n".join(lines), severity="warning", title=name)
+    body = "\n".join(problem.render() for problem in problems)
+    blocked = bool(fatal(problems))
+    head = f"{name} cannot run as written:" if blocked else f"{name} will run, with warnings:"
+    return CommandResult(f"{head}\n{body}", severity="error" if blocked else "warning", title=name)
 
 
 async def _draft_workflow(app: AltusApp, wanted: str) -> CommandResult:
@@ -843,7 +877,7 @@ def build_registry() -> CommandRegistry:
         Command(
             "workflow",
             "Design a multi-step workflow",
-            "workflow [<name> | new <…> | list | show <name> | validate <name> | run <name>]",
+            "workflow [<name> | new <…> | list | show | validate | run | runs]",
             cmd_workflow,
             aliases=("workflows",),
         ),

@@ -18,6 +18,7 @@ from altus.tools.gcp.insight import (
     GcpQuotasTool,
     GcpTopologyTool,
 )
+from altus.tools.gcp.mutations import GcpWriteTool
 from altus.tools.gcp.reads import (
     GcpApisTool,
     GcpAssetsTool,
@@ -44,6 +45,8 @@ def gcp_tools(settings: Any = None) -> list[BaseTool]:
         GcpCostTool(),
         GcpQuotasTool(),
     ]
+    if settings is None or getattr(settings, "allow_writes", True):
+        tools.append(GcpWriteTool())
     return tools
 
 

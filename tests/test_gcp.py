@@ -507,8 +507,26 @@ async def test_assets_tabulates_what_it_finds(tmp_path: Any) -> None:
     assert outcome.visual is not None
 
 
+READ_TOOLS = {
+    "gcp_whoami",
+    "gcp_projects",
+    "gcp_apis",
+    "gcp_explain",
+    "gcp_call",
+    "gcp_can_i",
+    "gcp_assets",
+    "gcp_inventory",
+    "gcp_topology",
+    "gcp_cost",
+    "gcp_quotas",
+}
+
+
 def test_read_only_is_declared_correctly_on_every_tool() -> None:
-    assert all(t.read_only for t in gcp_tools())
+    """`read_only` is what a read-only registry filters on, so it has to be
+    right on all of them --- in both directions."""
+    for found in gcp_tools():
+        assert found.read_only == (found.name in READ_TOOLS), found.name
 
 
 def test_the_registry_registers_gcp_when_asked(tmp_path: Any) -> None:
@@ -764,3 +782,307 @@ def test_the_drill_down_knows_how_to_read_a_gcp_node() -> None:
     # `global` is not a zone: sending it as one is a 400.
     assert screen._args(("Firewall", "global", "allow-ssh")) == {"method": "compute.firewalls.list"}
     assert set(GCP_READERS) >= {"Instance", "Network", "Firewall"}
+
+
+# ------------------------------------------------------------------ mutations
+
+
+class WritableGcp(FakeGcp):
+    """FakeGcp plus the preflight surfaces, each independently steerable."""
+
+    def __init__(self, **kw: Any) -> None:
+        super().__init__(**kw)
+        self.protection: dict[str, Any] = {}
+        self.liens: list[dict[str, str]] = []
+        self.validate_error: Exception | None = None
+
+    async def call(self, method_id: str, params: dict[str, Any] | None = None, **kw: Any) -> Any:
+        arguments = dict(params or {})
+        if arguments.get("validateOnly") or arguments.get("dryRun"):
+            self.calls.append((f"{method_id}#validate", arguments))
+            if self.validate_error is not None:
+                raise self.validate_error
+            return {}
+        if method_id == "cloudresourcemanager.liens.list":
+            self.calls.append((method_id, arguments))
+            return {"liens": list(self.liens)}
+        if method_id.endswith(".get") and self.protection:
+            self.calls.append((method_id, arguments))
+            return dict(self.protection)
+        return await super().call(method_id, params, **kw)
+
+    @property
+    def changing(self) -> list[str]:
+        """Calls that actually changed something --- a validateOnly probe does
+        not count, and neither does a read."""
+        out = []
+        for method, _params in self.calls:
+            if method.endswith(("#validate", "#test")):
+                continue
+            if gcp.classify(method) in (Sensitivity.READ, Sensitivity.SENSITIVE_READ):
+                continue
+            out.append(method)
+        return out
+
+
+def deny() -> Any:
+    from altus.tools.approval import Decision, RecordingPolicy
+
+    return RecordingPolicy(decision=Decision.DENY)
+
+
+def allow() -> Any:
+    from altus.tools.approval import Decision, RecordingPolicy
+
+    return RecordingPolicy(decision=Decision.ALLOW)
+
+
+def write_tool() -> Any:
+    from altus.tools.gcp.mutations import GcpWriteTool
+
+    return GcpWriteTool()
+
+
+async def test_the_deny_sweep(tmp_path: Any) -> None:
+    """The assertion that caught most of the bugs in all three previous clouds.
+
+    Refused, gcp_write must have issued nothing but reads and preflight probes.
+    A change escaping before the approval returns is the single failure this
+    whole layer exists to prevent.
+    """
+    for args in (
+        {"method": "compute.instances.delete", "params": {"zone": "z", "instance": "web-1"}},
+        {"method": "compute.instances.setLabels", "params": {"zone": "z", "instance": "web-1"}},
+        {"method": "storage.buckets.setIamPolicy", "params": {"bucket": "b"}},
+    ):
+        provider = WritableGcp()
+        policy = deny()
+        outcome = await write_tool().run(args, context(tmp_path, provider, approvals=policy))
+        assert outcome.is_error or "rejected" in outcome.content.casefold()
+        assert provider.changing == [], f"{args['method']} issued {provider.changing}"
+        assert len(policy.seen) == 1
+
+
+async def test_the_prompt_admits_there_is_no_preview(tmp_path: Any) -> None:
+    """98% of Google's methods cannot be validated without running them, and
+    the prompt has to say so rather than imply a check that never happened."""
+    provider = WritableGcp()
+    policy = allow()
+    await write_tool().run(
+        {"method": "compute.instances.delete", "params": {"zone": "z", "instance": "web-1"}},
+        context(tmp_path, provider, approvals=policy),
+    )
+    preflight = policy.seen[0].dry_run
+    assert "no preview exists" in preflight
+    assert "not known in advance" in preflight
+    # It may say a validation *cannot* happen; it must never say one did.
+    assert "succeeded" not in preflight
+
+
+async def test_a_method_that_can_be_validated_says_so_instead(tmp_path: Any) -> None:
+    method = next(
+        (
+            m
+            for m in corpus()
+            if gcp.supports_validate_only(m) and gcp.classify(m) is Sensitivity.MUTATE
+        ),
+        "",
+    )
+    assert method, "no validatable mutating method in the corpus"
+    provider = WritableGcp()
+    policy = allow()
+    await write_tool().run({"method": method}, context(tmp_path, provider, approvals=policy))
+    preflight = policy.seen[0].dry_run
+    assert "succeeded" in preflight
+    assert "no preview exists" not in preflight
+    assert any(m.endswith("#validate") for m, _p in provider.calls)
+
+
+async def test_deletion_protection_refuses_before_anyone_is_asked(tmp_path: Any) -> None:
+    """GCP's nearest equivalent to an Azure lock: a real "this call will fail"
+    signal, so prompting would spend the user's attention on nothing."""
+    provider = WritableGcp()
+    provider.protection = {"name": "web-1", "deletionProtection": True}
+    policy = allow()
+    outcome = await write_tool().run(
+        {"method": "compute.instances.delete", "params": {"zone": "z", "instance": "web-1"}},
+        context(tmp_path, provider, approvals=policy),
+    )
+    assert outcome.is_error
+    assert outcome.summary == "protected"
+    assert "deletionProtection" in outcome.content
+    assert policy.seen == []
+    assert provider.changing == []
+
+
+async def test_an_unreadable_resource_is_not_treated_as_protected(tmp_path: Any) -> None:
+    """Plenty of identities may delete something they cannot read, and refusing
+    on "I could not check" would make the tool useless on those."""
+    provider = WritableGcp(fail="compute.instances.get")
+    policy = allow()
+    outcome = await write_tool().run(
+        {"method": "compute.instances.delete", "params": {"zone": "z", "instance": "web-1"}},
+        context(tmp_path, provider, approvals=policy),
+    )
+    assert not outcome.is_error
+    assert "could not be checked" in policy.seen[0].dry_run
+
+
+async def test_a_lien_refuses_a_project_delete(tmp_path: Any) -> None:
+    provider = WritableGcp()
+    provider.liens = [{"name": "liens/keep", "reason": "production"}]
+    policy = allow()
+    outcome = await write_tool().run(
+        {
+            "method": "cloudresourcemanager.projects.delete",
+            "params": {"name": "projects/demo-project"},
+        },
+        context(tmp_path, provider, approvals=policy),
+    )
+    assert outcome.is_error
+    assert outcome.summary == "lien"
+    assert "production" in outcome.content
+    assert policy.seen == []
+    assert provider.changing == []
+
+
+async def test_liens_are_only_asked_about_where_they_apply(tmp_path: Any) -> None:
+    """Nothing but a project delete is lien-protected, so asking elsewhere
+    would be a wasted call on every single change."""
+    provider = WritableGcp()
+    await write_tool().run(
+        {"method": "compute.instances.setLabels", "params": {"zone": "z", "instance": "w"}},
+        context(tmp_path, provider, approvals=allow()),
+    )
+    assert "cloudresourcemanager.liens.list" not in [m for m, _p in provider.calls]
+
+
+async def test_the_permission_check_reaches_the_prompt(tmp_path: Any) -> None:
+    provider = WritableGcp()
+    provider.permissions = ["compute.instances.setLabels"]
+    policy = allow()
+    await write_tool().run(
+        {"method": "compute.instances.setLabels", "params": {"zone": "z", "instance": "w"}},
+        context(tmp_path, provider, approvals=policy),
+    )
+    assert "you hold compute.instances.setLabels" in policy.seen[0].dry_run
+
+
+async def test_a_missing_permission_is_said_plainly(tmp_path: Any) -> None:
+    provider = WritableGcp()
+    provider.permissions = []
+    policy = allow()
+    await write_tool().run(
+        {"method": "compute.instances.setLabels", "params": {"zone": "z", "instance": "w"}},
+        context(tmp_path, provider, approvals=policy),
+    )
+    assert "do NOT hold" in policy.seen[0].dry_run
+
+
+async def test_a_privileged_change_demands_the_name_typed(tmp_path: Any) -> None:
+    provider = WritableGcp()
+    policy = allow()
+    await write_tool().run(
+        {"method": "storage.buckets.setIamPolicy", "params": {"bucket": "b"}},
+        context(tmp_path, provider, approvals=policy),
+    )
+    request = policy.seen[0]
+    assert request.sensitivity is Sensitivity.PRIVILEGED
+    assert request.needs_challenge
+    assert not request.may_grant_always
+
+
+async def test_a_protected_project_escalates_an_ordinary_change(tmp_path: Any) -> None:
+    from altus.cloud.base import ProtectionRules
+
+    provider = WritableGcp()
+    policy = allow()
+    rules = ProtectionRules.build([], ["demo-project"], "confirm")
+    await write_tool().run(
+        {"method": "compute.instances.setLabels", "params": {"zone": "z", "instance": "w"}},
+        context(tmp_path, provider, approvals=policy, protection=rules),
+    )
+    assert policy.seen[0].protected
+    assert policy.seen[0].needs_challenge
+
+
+async def test_protected_deny_refuses_outright(tmp_path: Any) -> None:
+    from altus.cloud.base import ProtectionRules
+
+    provider = WritableGcp()
+    policy = allow()
+    rules = ProtectionRules.build([], ["demo-project"], "deny")
+    outcome = await write_tool().run(
+        {"method": "compute.instances.setLabels", "params": {"zone": "z", "instance": "w"}},
+        context(tmp_path, provider, approvals=policy, protection=rules),
+    )
+    assert outcome.is_error
+    assert policy.seen == []
+    assert provider.changing == []
+
+
+async def test_an_unknown_method_is_refused_before_anything_is_sent(tmp_path: Any) -> None:
+    provider = WritableGcp()
+    outcome = await write_tool().run(
+        {"method": "compute.instances.frobnicate"}, context(tmp_path, provider)
+    )
+    assert outcome.is_error
+    assert provider.calls == []
+
+
+async def test_a_read_is_sent_back_to_the_tool_that_does_not_prompt(tmp_path: Any) -> None:
+    provider = WritableGcp()
+    outcome = await write_tool().run(
+        {"method": "compute.instances.list"}, context(tmp_path, provider)
+    )
+    assert outcome.is_error
+    assert "gcp_call" in outcome.content
+    assert provider.calls == []
+
+
+async def test_iam_writes_can_be_switched_off_at_the_gate(tmp_path: Any) -> None:
+    """It cannot work by withholding a tool --- the same gcp_write sets a label
+    and a bucket's IAM policy --- so it is checked where the decision is made."""
+    provider = WritableGcp()
+    settings = GcpSettings(allow_iam_writes=False)
+    outcome = await write_tool().run(
+        {"method": "storage.buckets.setIamPolicy", "params": {"bucket": "b"}},
+        context(tmp_path, provider, settings=settings, approvals=allow()),
+    )
+    assert outcome.is_error
+    assert "[cloud.gcp]" in outcome.content
+    assert provider.changing == []
+
+    # And the same tool still writes an ordinary resource.
+    provider = WritableGcp()
+    outcome = await write_tool().run(
+        {"method": "compute.instances.setLabels", "params": {"zone": "z", "instance": "w"}},
+        context(tmp_path, provider, settings=settings, approvals=allow()),
+    )
+    assert not outcome.is_error
+
+
+async def test_delete_can_be_switched_off_at_the_gate(tmp_path: Any) -> None:
+    provider = WritableGcp()
+    settings = GcpSettings(allow_delete=False)
+    outcome = await write_tool().run(
+        {"method": "compute.instances.delete", "params": {"zone": "z", "instance": "w"}},
+        context(tmp_path, provider, settings=settings, approvals=allow()),
+    )
+    assert outcome.is_error
+    assert provider.changing == []
+
+
+def test_allow_writes_removes_the_tool_entirely() -> None:
+    """A class that is off is never registered, so the model is not told it
+    exists --- deliberately stronger than refusing at call time."""
+    assert "gcp_write" in {t.name for t in gcp_tools(GcpSettings())}
+    assert "gcp_write" not in {t.name for t in gcp_tools(GcpSettings(allow_writes=False))}
+
+
+def test_a_read_only_registry_carries_no_gcp_change(tmp_path: Any) -> None:
+    registry = default_registry(
+        writes=False, kubernetes=False, aws=False, azure=False, gcp=True, cloud=CloudSettings()
+    )
+    assert "gcp_call" in registry
+    assert "gcp_write" not in registry

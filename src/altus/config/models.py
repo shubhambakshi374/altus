@@ -220,6 +220,33 @@ class WorkflowSettings(BaseModel):
     allow_model_authoring: bool = True
 
 
+class McpCustomSettings(BaseModel):
+    """A server Altus has never heard of, configured by the user.
+
+    The catalogue can never be finished --- Darktrace has no official MCP
+    server today --- and the alternative to a door is that somebody forks
+    Altus to add one. What this does not do is pretend: a custom server has no
+    manifest, so every tool it publishes fails closed to a typed challenge
+    unless the server itself declares it read-only, and every surface that
+    lists it says so.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool | None = None
+    summary: str = ""
+    url: str = ""
+    """For an HTTP server. Leave empty and set `command` for a local one."""
+    command: list[str] = Field(default_factory=list)
+    """argv for a stdio server. argv[0] must be on PATH."""
+    auth: Literal["token", "oauth", "headers"] = "token"
+    env: list[str] = Field(default_factory=list)
+    """Environment variables carrying credentials, most significant first.
+    Also how Altus decides the server is worth offering at all."""
+    scope: str = ""
+    reference: str = ""
+
+
 class McpSettings(BaseModel):
     """The MCP servers Altus ships kitted out.
 
@@ -253,9 +280,26 @@ class McpSettings(BaseModel):
     snowflake: McpServerSettings = Field(default_factory=McpServerSettings)
     databricks: McpServerSettings = Field(default_factory=McpServerSettings)
 
+    custom: dict[str, McpCustomSettings] = Field(default_factory=dict)
+    """`[mcp.custom.<name>]` --- servers Altus does not ship. Unclassified."""
+
     def for_server(self, server: str) -> McpServerSettings:
         found = getattr(self, server, None)
-        return found if isinstance(found, McpServerSettings) else McpServerSettings()
+        if isinstance(found, McpServerSettings):
+            return found
+        entry = self.custom.get(server)
+        if entry is not None:
+            # One door onto per-server settings, so a custom server's url and
+            # scope reach the provider by the same route a shipped one's do.
+            return McpServerSettings(enabled=entry.enabled, url=entry.url, scope=entry.scope)
+        return McpServerSettings()
+
+    @property
+    def server_ids(self) -> list[str]:
+        """Every server this config could offer, shipped or custom."""
+        from altus.mcp.catalog import CATALOG
+
+        return [spec.id for spec in CATALOG] + sorted(self.custom)
 
 
 class CloudSettings(BaseModel):

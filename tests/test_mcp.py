@@ -203,9 +203,12 @@ def test_a_tool_the_manifest_has_never_seen_is_privileged() -> None:
     assert "manifest" in why_unknown("github", "nuke_everything_v2")
 
 
-def test_a_server_altus_does_not_ship_is_privileged() -> None:
+def test_a_server_with_no_manifest_is_privileged() -> None:
+    """The reason names what is missing rather than how it came to be missing,
+    because the same sentence has to be true of a server Altus has never heard
+    of and of one the user configured under [mcp.custom]."""
     assert classify("some-random-server", "read_thing") is Sensitivity.PRIVILEGED
-    assert "not a server Altus ships" in why_unknown("some-random-server", "read_thing")
+    assert "no manifest" in why_unknown("some-random-server", "read_thing")
 
 
 def test_a_known_tool_has_no_unknown_reason() -> None:
@@ -1086,3 +1089,69 @@ def test_servicenow_ships_no_endpoint_because_there_is_none_to_ship() -> None:
     assert spec.url == ""
     assert "MCP Server Console" in spec.notes
     assert "dynamic client registration" in spec.notes, "and why OAuth is not used"
+
+
+# --- the custom door -----------------------------------------------------
+
+
+def custom_config(**over: Any) -> Any:
+    from altus.config.models import Config, McpCustomSettings
+
+    config = Config()
+    config.mcp.custom["darktrace"] = McpCustomSettings(
+        **{"url": "https://mcp.internal/dt", "env": ["DARKTRACE_TOKEN"], **over}
+    )
+    return config.mcp
+
+
+def test_a_custom_server_joins_the_catalogue_but_is_marked_as_custom() -> None:
+    """The catalogue can never be finished --- Darktrace has no official MCP
+    server today --- and the alternative to a door is somebody forking Altus."""
+    from altus.mcp.catalog import catalog, custom_servers
+
+    settings = custom_config()
+    assert [spec.id for spec in catalog(settings)][-1] == "darktrace"
+    (spec,) = custom_servers(settings)
+    assert spec.custom and spec.source == "custom"
+    assert server_spec("darktrace", settings) is not None
+    assert server_spec("darktrace") is None, "and never without being configured"
+
+
+def test_every_tool_on_a_custom_server_fails_closed() -> None:
+    """Altus has read no manifest, no documentation and no source for it, so
+    the only honest position is that any tool could do anything."""
+    assert classify("darktrace", "get_device_summary") is Sensitivity.PRIVILEGED
+    assert classify("darktrace", "list_model_breaches") is Sensitivity.PRIVILEGED
+
+
+def test_a_custom_server_can_lower_its_own_tools_but_not_raise_its_trust() -> None:
+    """Annotations stay a ceiling. A custom server saying "this is read-only"
+    is believed downward, which is the only direction that is safe."""
+    said_read_only = ToolInfo(name="get_device", read_only_hint=True)
+    said_write = ToolInfo(name="get_device", read_only_hint=False)
+    assert classify("darktrace", "get_device", said_read_only) is Sensitivity.PRIVILEGED
+    assert classify("darktrace", "get_device", said_write) is Sensitivity.PRIVILEGED
+
+
+def test_a_stdio_custom_server_is_detected_from_its_command() -> None:
+    from altus.mcp.catalog import Transport, custom_servers
+
+    (spec,) = custom_servers(custom_config(url="", command=["my-mcp-server"]))
+    assert spec.transport is Transport.STDIO
+    assert spec.command == ("my-mcp-server",)
+
+
+def test_a_custom_servers_url_reaches_the_provider_the_same_way() -> None:
+    """One door onto per-server settings, so nothing downstream has to know
+    which kind of server it is holding."""
+    assert custom_config().for_server("darktrace").url == "https://mcp.internal/dt"
+    assert "darktrace" in custom_config().server_ids
+
+
+def test_a_server_with_no_manifest_says_why_rather_than_showing_a_zero() -> None:
+    """ "0 tools in Altus's manifest" reads like a manifest that happens to be
+    empty rather than one that cannot be written. ServiceNow's cannot."""
+    spec = server_spec("servicenow")
+    assert spec is not None
+    assert manifest("servicenow").tools == {}
+    assert spec.unknown_why, "which is the sentence /mcp and the prompt both show"

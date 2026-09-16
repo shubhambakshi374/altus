@@ -14,7 +14,7 @@ from typing import Any, ClassVar
 
 from altus.cloud.base import ProtectionMode, Sensitivity
 from altus.cloud.redact import redact, redact_text
-from altus.mcp.catalog import CATALOG, ServerSpec, enabled_servers, server_spec, why_off
+from altus.mcp.catalog import ServerSpec, catalog, enabled_servers, server_spec, why_off
 from altus.mcp.classify import classify, manifest, target_for, why_unknown
 from altus.tools.base import BaseTool, ToolContext, ToolOutcome
 
@@ -50,11 +50,11 @@ class McpTool(BaseTool):
         return list(enabled_servers(self.settings(ctx)))
 
     def resolve(self, server: str, ctx: ToolContext) -> ServerSpec | ToolOutcome:
-        spec = server_spec(server)
+        spec = server_spec(server, self.settings(ctx))
         if spec is None:
-            known = ", ".join(s.id for s in CATALOG)
+            known = ", ".join(s.id for s in catalog(self.settings(ctx)))
             return ToolOutcome.error(
-                f"{server!r} is not a server Altus ships. Available: {known}",
+                f"{server!r} is not a server Altus offers. Available: {known}",
                 summary="unknown server",
             )
         if spec not in self.enabled_servers(ctx):

@@ -199,7 +199,13 @@ def _unknown(server: str, tool: str, scope: str) -> tuple[Sensitivity, str]:
             return found
     spec = server_spec(server)
     if spec is None:
-        return Sensitivity.PRIVILEGED, f"{server!r} is not a server Altus ships"
+        # True of a server Altus has never heard of *and* of one configured
+        # under [mcp.custom]. Both have no manifest, and the honest thing to
+        # say is what is missing rather than how it came to be missing.
+        return (
+            Sensitivity.PRIVILEGED,
+            f"Altus ships no manifest for {server!r}, so nothing is known about its tools",
+        )
     return spec.unknown, spec.unknown_why
 
 

@@ -464,9 +464,35 @@ one — or to diff it against the manifest — without an account.
 your model provider. Results are redacted and capped at `max_rows` on the way,
 and `mcp_servers` says so out loud rather than burying it here.
 
-Only these seven. Pointing Altus at an arbitrary MCP server would mean tools
-with no manifest, every one of them failing closed to a typed challenge — which
-is how a challenge stops being read.
+### And the rest
+
+A curated catalogue can never be finished — Darktrace has no official MCP
+server today — and the alternative to a door is that somebody forks Altus to
+add one. So there is a door, and it does not pretend:
+
+```toml
+[mcp.custom.darktrace]
+url     = "https://mcp.internal/darktrace"
+env     = ["DARKTRACE_TOKEN"]
+summary = "Darktrace threat detection"
+```
+
+```
+  darktrace   ready  (custom, unclassified)
+    Darktrace threat detection
+    no manifest --- this server is configured under [mcp.custom] and Altus
+    ships no manifest for it, so nothing is known about what its tools do
+    every tool needs a typed confirmation unless the server says otherwise
+```
+
+A custom server carries an empty manifest and the strictest fail-closed setting
+there is. Its own annotations still apply **as a ceiling**, so a tool it
+declares read-only classifies as a read — a custom server can lower its tools'
+sensitivity and can never raise its own trust.
+
+That is a real cost, and it is the point: the nine shipped servers were
+classified by a human against a source, and a tenth that nobody classified
+should not be able to sit in the list looking the same.
 
 ## Workflows
 

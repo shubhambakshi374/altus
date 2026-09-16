@@ -110,8 +110,14 @@ class McpProvider:
     """Per-server endpoint scope --- the Databricks ``genie/<space>`` or
     ``functions/<catalog>/<schema>`` that decides what the endpoint can do."""
     urls: dict[str, str] = field(default_factory=dict)
-    """Per-server URL overrides, for the two vendors whose endpoint contains
-    the customer's own account or workspace."""
+    """Per-server URL overrides, for the vendors whose endpoint contains the
+    customer's own account or workspace --- and for ServiceNow, which has no
+    default endpoint at all."""
+    custom: dict[str, ServerSpec] = field(default_factory=dict)
+    """Servers from ``[mcp.custom]``. Held here rather than looked up globally
+    so that nothing in the classifier or the gate has to know they exist: a
+    custom server has no manifest, and every one of those paths already fails
+    closed for a server it cannot find a manifest for."""
     _tools: dict[str, tuple[ToolInfo, ...]] = field(default_factory=dict, repr=False)
 
     def reset(self, server: str = "") -> None:
@@ -184,9 +190,9 @@ class McpProvider:
         return text
 
     def _session(self, server: str) -> Any:
-        spec = server_spec(server)
+        spec = server_spec(server) or self.custom.get(server)
         if spec is None:
-            raise McpError(f"{server!r} is not a server Altus ships")
+            raise McpError(f"{server!r} is not a server Altus ships or was configured with")
         missing = missing_credentials(spec)
         if missing:
             raise McpError(f"{server}: no credentials --- {spec.missing_hint}")

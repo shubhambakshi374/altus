@@ -314,9 +314,7 @@ def build_cloud_context(config: Config) -> CloudContext:
     """Cluster state for the tools. The client itself is built lazily, so a
     session that never mentions Kubernetes never connects to one."""
     from altus.cloud.base import ProtectionRules, integration
-    from altus.mcp.catalog import CATALOG
 
-    MCP_SERVERS = [spec.id for spec in CATALOG]
     settings = config.cloud
     kubeconfigs = tuple(settings.kubeconfigs)
     provider = None
@@ -352,13 +350,18 @@ def build_cloud_context(config: Config) -> CloudContext:
     mcp_provider = None
     mcp_entry = integration("mcp")
     if mcp_entry and mcp_entry.available and config.mcp.enabled:
+        from altus.mcp.catalog import custom_servers
         from altus.mcp.session import McpProvider
 
+        # Every id this config could offer, so a custom server's url and scope
+        # reach the provider by the same route a shipped one's do.
+        ids = config.mcp.server_ids
         mcp_provider = McpProvider(
             timeout=config.mcp.timeout,
             max_result_bytes=config.mcp.max_result_bytes,
-            scopes={s: config.mcp.for_server(s).scope for s in MCP_SERVERS},
-            urls={s: config.mcp.for_server(s).url for s in MCP_SERVERS},
+            scopes={s: config.mcp.for_server(s).scope for s in ids},
+            urls={s: config.mcp.for_server(s).url for s in ids},
+            custom={spec.id: spec for spec in custom_servers(config.mcp)},
         )
 
     forwards = None

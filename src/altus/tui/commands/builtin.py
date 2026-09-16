@@ -451,7 +451,7 @@ async def cmd_mcp(app: AltusApp, args: list[str]) -> CommandResult:
     Altus has never seen classifies privileged, which is safe but is also the
     signal that a vendor shipped a release.
     """
-    from altus.mcp.catalog import CATALOG, enabled_servers, why_off
+    from altus.mcp.catalog import catalog, enabled_servers, why_off
     from altus.mcp.classify import drift, manifest
 
     settings = app.config.mcp
@@ -465,12 +465,23 @@ async def cmd_mcp(app: AltusApp, args: list[str]) -> CommandResult:
     # two answers depending on which door it came through.
     enabled = [spec.id for spec in enabled_servers(settings)]
     rows = ["MCP servers:"]
-    for spec in CATALOG:
+    for spec in catalog(settings):
         state = "ready" if spec.id in enabled else f"off --- {why_off(spec, settings)}"
         table = manifest(spec.id)
-        rows.append(f"  {spec.id:<11} {state}")
+        mark = "  (custom, unclassified)" if spec.custom else ""
+        rows.append(f"  {spec.id:<11} {state}{mark}")
         rows.append(f"    {', '.join(spec.products)}")
-        rows.append(f"    {len(table.tools)} tools in Altus's manifest ({table.source})")
+        if table.tools:
+            rows.append(f"    {len(table.tools)} tools in Altus's manifest ({table.source})")
+        else:
+            # Not "0 tools in Altus's manifest", which reads like a manifest
+            # that happens to be empty rather than one that cannot be written.
+            # `unknown_why` is already the sentence explaining that, and it is
+            # the same sentence the approval prompt shows.
+            rows.append(f"    no manifest --- {spec.unknown_why}")
+            rows.append(
+                "    every tool needs a typed confirmation unless the server says otherwise"
+            )
         if spec.notes:
             rows.append(f"    note: {spec.notes}")
 

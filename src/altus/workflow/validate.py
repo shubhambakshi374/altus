@@ -17,7 +17,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from altus.workflow.models import AgentStep, ToolStep, Workflow
+from altus.workflow.models import AgentStep, ApprovalStep, ToolStep, Workflow
+from altus.workflow.refs import ancestors, refs_in
 
 #: A tool's prefix names the integration that ships it. Used only to tell a
 #: typo from an extra that is not installed.
@@ -45,8 +46,14 @@ def check(workflow: Workflow, registry: Any) -> list[Problem]:
 
     found += _duplicate_ids(workflow)
     found += _dangling_needs(workflow)
-    found += _cycles(workflow)
+    cycles = _cycles(workflow)
+    found += cycles
     found += _missing_tools(workflow, registry)
+    # Reference checking walks `needs`, so it is meaningless on a graph that
+    # does not terminate. Skipping it keeps a cycle from also producing a pile
+    # of confusing reference errors that vanish once the cycle is fixed.
+    if not cycles:
+        found += _bad_references(workflow)
     return found
 
 
@@ -169,3 +176,42 @@ def _tool_problem(name: str, step_id: str, registry: Any, *, required: bool) -> 
         step_id,
         fatal=required,
     )
+
+
+# ----------------------------------------------------------------- references
+
+
+def _bad_references(workflow: Workflow) -> list[Problem]:
+    """``${x}`` is only legitimate when ``x`` is guaranteed to have run.
+
+    Ordering in the file guarantees nothing --- the engine runs the graph, not
+    the list --- so a reference to a step that is merely *earlier* would work
+    until somebody reordered two independent steps. Requiring the dependency
+    makes the data flow and the execution order the same statement.
+    """
+    needs = {step.id: list(step.needs) for step in workflow.steps}
+    ids = set(needs)
+    found: list[Problem] = []
+    for step in workflow.steps:
+        available = ancestors(step.id, needs)
+        for name in sorted(_referenced(step)):
+            if name == step.id:
+                found.append(Problem(f"${{{name}}} refers to this step's own output", step.id))
+            elif name not in ids:
+                found.append(Problem(f"${{{name}}} names a step that does not exist", step.id))
+            elif name not in available:
+                found.append(
+                    Problem(
+                        f"${{{name}}} is not guaranteed to have run — add {name!r} to needs",
+                        step.id,
+                    )
+                )
+    return found
+
+
+def _referenced(step: AgentStep | ApprovalStep | ToolStep) -> set[str]:
+    if isinstance(step, ToolStep):
+        return refs_in(step.args)
+    if isinstance(step, AgentStep):
+        return refs_in(step.prompt)
+    return refs_in(step.message)

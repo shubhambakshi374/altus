@@ -179,6 +179,52 @@ CATALOG: tuple[ServerSpec, ...] = (
         ),
     ),
     ServerSpec(
+        id="crowdstrike",
+        products=("CrowdStrike Falcon",),
+        summary="Detections, vulnerabilities, hosts, threat intel and containers",
+        transport=Transport.STDIO,
+        auth=Auth.TOKEN,
+        command=("falcon-mcp",),
+        env=("FALCON_CLIENT_ID", "FALCON_CLIENT_SECRET", "FALCON_BASE_URL"),
+        read_only_flag=("--read-only",),
+        reference="https://github.com/CrowdStrike/falcon-mcp",
+        notes=(
+            "Upstream is in public preview, so its tool list may move between "
+            "releases --- the manifest is derived at a pinned tag and the weekly "
+            "drift job is what notices. Falcon's blast radius is the tenant, and "
+            "no argument names it, so set scope under [mcp.crowdstrike] to the "
+            "tenant you are pointed at; until you do, every mutation is treated "
+            "as an unresolved target and demands a typed confirmation."
+        ),
+    ),
+    ServerSpec(
+        id="servicenow",
+        products=("ServiceNow",),
+        summary="Incidents, changes, problems, the CMDB and knowledge",
+        transport=Transport.HTTP,
+        auth=Auth.TOKEN,
+        url="",
+        env=("SERVICENOW_TOKEN",),
+        unknown=Sensitivity.PRIVILEGED,
+        unknown_why=(
+            "a ServiceNow instance assembles its own tool list from role-based tool "
+            "packages, so a name Altus does not know could be a knowledge lookup or "
+            "a write to any table the caller can reach"
+        ),
+        reference=(
+            "https://www.servicenow.com/community/now-assist-articles/"
+            "mcp-server-console-faq/ta-p/3550125"
+        ),
+        notes=(
+            "No default URL on purpose: the endpoint is a service record created in "
+            "MCP Server Console on your own instance, so there is nothing to guess. "
+            "Set url under [mcp.servicenow]. Altus uses a bearer token rather than "
+            "its usual OAuth flow because MCP Server Console does not support "
+            "dynamic client registration --- every client has to be registered by an "
+            "administrator first, which Altus cannot do for you."
+        ),
+    ),
+    ServerSpec(
         id="snowflake",
         products=("Snowflake",),
         summary="Cortex Analyst and Search, and whatever SQL the server object allows",

@@ -1,0 +1,24 @@
+# ServiceNow MCP Server Console.
+#
+# Deliberately empty, and it will stay empty. ServiceNow assembles an
+# instance's tool list from role-based tool packages an administrator turns
+# on, so the tools one company's instance publishes are not the tools
+# another's does. That is the same class as Snowflake and Databricks: a name
+# manifest here is not stale, it is structurally impossible.
+#
+# So every tool fails closed to privileged, and `unknown_why` in the catalog
+# says why in the prompt rather than leaving the user to guess. Two things
+# soften that in practice: the server's own annotations are still read as a
+# ceiling, so a tool ServiceNow declares read-only classifies as a read; and
+# `/mcp check` lists what an instance actually publishes, which is the only
+# way to find out.
+#
+# `target_fields` names the arguments that say *where* a call lands. ServiceNow
+# is one instance per configured URL, so the instance is the blast radius and
+# the table name is the closest thing to a scope inside it.
+source = "curated"
+recorded = "2026-09-16"
+reference = "https://www.servicenow.com/community/now-assist-articles/mcp-server-console-faq/ta-p/3550125"
+target_fields = ["table", "sys_class_name"]
+
+[tools]

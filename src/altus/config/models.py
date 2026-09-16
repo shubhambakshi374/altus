@@ -245,6 +245,8 @@ class McpSettings(BaseModel):
     max_result_bytes: int = 100_000
     github: McpServerSettings = Field(default_factory=McpServerSettings)
     atlassian: McpServerSettings = Field(default_factory=McpServerSettings)
+    crowdstrike: McpServerSettings = Field(default_factory=McpServerSettings)
+    servicenow: McpServerSettings = Field(default_factory=McpServerSettings)
     grafana: McpServerSettings = Field(default_factory=McpServerSettings)
     datadog: McpServerSettings = Field(default_factory=McpServerSettings)
     newrelic: McpServerSettings = Field(default_factory=McpServerSettings)

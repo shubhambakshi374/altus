@@ -346,8 +346,8 @@ never returns a number it did not get.
 The four clouds cover infrastructure. The systems around it — the ticket that
 explains a deploy, the dashboard that showed it failing, the warehouse the data
 landed in — have proprietary APIs with no corpus to sweep and vendor-maintained
-MCP servers already written. Altus ships seven of them kitted out. You bring
-credentials, not config files.
+MCP servers already written. Altus ships nine of them kitted out, and a door for
+anything else. You bring credentials, not config files.
 
 | Server | Covers |
 |---|---|
@@ -356,6 +356,8 @@ credentials, not config files.
 | `grafana` | Dashboards, Prometheus, Loki, Pyroscope, incidents, on-call |
 | `datadog` | Metrics, logs, traces, monitors, incidents, security signals |
 | `newrelic` | Entities, NRQL, alerts, errors, deployment impact |
+| `crowdstrike` | Detections, vulnerabilities, hosts, threat intel, containers, RTR |
+| `servicenow` | Incidents, changes, problems, the CMDB, knowledge |
 | `snowflake` | Cortex Analyst and Search, and whatever SQL the server object allows |
 | `databricks` | Genie spaces, Vector Search indexes, Unity Catalog functions |
 
@@ -363,8 +365,8 @@ Bitbucket is not a separate entry because it is not a separate server:
 Atlassian's hosted server carries it alongside Jira. That server is **Cloud
 only** — Jira Data Center cannot connect to it at all.
 
-**Four tools, however many servers connect.** Those seven publish well over two
-hundred tools between them, which is more schema than everything else Altus
+**Four tools, however many servers connect.** Those nine publish well over six
+hundred tools between them, which is far more schema than everything else Altus
 registers put together, so none of it sits in the prompt:
 
 | | |
@@ -379,15 +381,15 @@ registers put together, so none of it sits in the prompt:
 botocore, the ARM provider manifests and the 600 GCP discovery documents all
 ship on disk, so those classifiers read a corpus. An MCP server's tool list
 lives behind an authenticated connection to a product that ships on its own
-schedule. Altus classifies against a **manifest** instead — 476 tool names as
+schedule. Altus classifies against a **manifest** instead — 642 tool names as
 shipped — and it says where each one came from, because the three sources are
 not equally good:
 
 | `source` | Meaning | Servers |
 |---|---|---|
-| `derived` | Generated from an upstream machine-readable artifact at a pinned ref | github |
+| `derived` | Generated from an upstream machine-readable artifact at a pinned ref | github, crowdstrike |
 | `documented` | Parsed from the vendor's published tool table | grafana, datadog, newrelic |
-| `curated` | Written by hand; no machine-readable source exists | atlassian, snowflake, databricks |
+| `curated` | Written by hand, or structurally impossible to list | atlassian, snowflake, databricks, servicenow |
 
 GitHub is `derived` because its server checks a JSON snapshot of every tool into
 its own repository — annotations, descriptions and input schemas, generated from
@@ -447,8 +449,8 @@ url   = "https://acme.cloud.databricks.com/api/2.0/mcp/{scope}"
 scope = "genie/01ef"
 ```
 
-Six of the seven are hosted; only Grafana runs as a local subprocess, and Altus
-never installs it. Credentials come from the environment first and the OS
+Six of the nine are hosted; Grafana and CrowdStrike run as local subprocesses,
+and Altus never installs either. Credentials come from the environment first and the OS
 keyring second, never from `config.toml`; OAuth tokens go to the keyring too. A
 stdio server is handed `PATH` and its own credentials and nothing else —
 `os.environ` would give a third-party binary every other credential on the
@@ -893,7 +895,7 @@ altus/storage     JSONL session persistence
 altus/workspace   the rooted filesystem context, and its containment rules
 altus/tools       the tools, one package per surface
 altus/cloud       Kubernetes, AWS, Azure and GCP: auth, classifiers, targets
-altus/mcp         the seven shipped MCP servers and their manifests
+altus/mcp         the nine shipped MCP servers, their manifests, and the custom door
 altus/workflow    what a workflow is, where it lives, and its blast radius
 altus/render      visuals, independent of the terminal drawing them
 altus/runner      one inference call

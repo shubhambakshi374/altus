@@ -53,13 +53,26 @@ def test_every_catalogued_server_ships_a_manifest(server: str) -> None:
     assert (MANIFESTS / f"{server}.toml").is_file()
 
 
+#: Servers whose endpoint is created per instance and therefore has no default.
+#: ServiceNow's MCP endpoint is a service record an administrator makes in MCP
+#: Server Console, so there is no path to ship.
+NO_DEFAULT_URL = {"servicenow"}
+
+
 @pytest.mark.parametrize("server", SERVERS)
 def test_a_server_says_how_to_reach_it_and_how_to_authenticate(server: str) -> None:
     spec = server_spec(server)
     assert spec is not None
     assert spec.products and spec.summary and spec.reference
     if spec.transport is Transport.HTTP:
-        assert spec.url
+        if server in NO_DEFAULT_URL:
+            # Allowed only where there is genuinely nothing to guess, and then
+            # the notes have to say so --- shipping an invented endpoint is how
+            # the New Relic launch command got into a release.
+            assert not spec.url
+            assert "url" in spec.notes, "say where the user is meant to get it"
+        else:
+            assert spec.url
     else:
         assert spec.command
     assert spec.env, "detection needs at least one credential variable to look for"
@@ -84,7 +97,13 @@ def test_manifest_loads_and_declares_its_provenance(server: str) -> None:
     table = manifest(server)
     assert table.source in {"derived", "documented", "curated"}
     assert table.recorded and table.reference
-    assert table.target_fields, "without target fields a prompt cannot name the blast radius"
+    if not table.target_fields:
+        # A manifest may have no target fields, but only when nothing in a
+        # call's arguments names the blast radius --- CrowdStrike's are all
+        # opaque ids. Then the fail-closed path has to be the one that fires:
+        # an unresolved target is treated as protected at the gate, which
+        # `test_an_unresolved_target_is_treated_as_protected` pins.
+        assert not target_for(server, {"id": "x", "ids": ["y"]}).resolved
     if table.source == "derived":
         assert table.upstream_ref, "a derived table must say which ref it was read from"
         assert table.upstream_ref != "main", "pin a release, not a moving branch"
@@ -946,3 +965,124 @@ def test_an_override_for_a_vanished_tool_stops_the_refresh() -> None:
     made = refresh.Generated(tools={"still_here": "read"}, upstream_ref="v1")
     with pytest.raises(refresh.RefreshError, match="no longer exist upstream"):
         refresh.render("demo", {"overrides": {"gone_away": "privileged"}}, made)
+
+
+# --- CrowdStrike and ServiceNow ------------------------------------------
+
+
+def test_the_crowdstrike_adapter_applies_the_prefix_the_server_applies() -> None:
+    """The mistake this would have been. `_add_tool` registers
+    `f"falcon_{name}"`, so a manifest built from the names in the source
+    matches nothing the server ever publishes --- and a manifest matching
+    nothing looks exactly like a server with 166 unknown tools, which is to
+    say it looks like the thing the manifest exists to prevent.
+    """
+    refresh = _refresh_module()
+    sample = """
+class Spotlight:
+    def register_tools(self, server):
+        self._add_tool(server=server, method=self.search_vulnerabilities,
+                       name="search_vulnerabilities")
+        self._add_tool(server=server, method=self.update_thing, name="update_thing",
+                       annotations=ToolAnnotations(readOnlyHint=False))
+
+    def register_resources(self, server):
+        self._add_resource(server, TextResource(name="search_vulnerabilities_fql_guide"))
+"""
+    tools = _run_crowdstrike_adapter(refresh, sample)
+    assert tools == {
+        "falcon_search_vulnerabilities": "read",
+        "falcon_update_thing": "mutate",
+    }
+
+
+def test_the_crowdstrike_adapter_ignores_resources() -> None:
+    """The same modules build `TextResource(name=...)` objects for their FQL
+    guides. Those are resources, not tools, and a regex over `name="..."`
+    would have swept every one of them into the tool table."""
+    refresh = _refresh_module()
+    tools = _run_crowdstrike_adapter(
+        refresh,
+        "def register_resources(self, s):\n"
+        '    self._add_resource(s, TextResource(name="some_fql_guide"))\n'
+        "def register_tools(self, s):\n"
+        '    self._add_tool(server=s, method=self.x, name="real_tool")\n',
+    )
+    assert tools == {"falcon_real_tool": "read"}
+
+
+def _run_crowdstrike_adapter(refresh: Any, source: str) -> dict[str, str]:
+    """Drive the adapter over one in-memory module, never the network."""
+    import unittest.mock
+
+    with unittest.mock.patch.object(
+        refresh, "_falcon_sources", lambda _path: [("modules/sample.py", source)]
+    ):
+        return dict(refresh.crowdstrike_adapter().tools)
+
+
+def test_a_tool_name_that_is_not_a_literal_stops_the_refresh() -> None:
+    """A computed name means the derivation is no longer complete, and an
+    incomplete derived manifest is worse than an honest curated one."""
+    refresh = _refresh_module()
+    with pytest.raises(refresh.RefreshError, match="not a literal"):
+        _run_crowdstrike_adapter(refresh, "self._add_tool(server=s, method=m, name=PREFIX + x)\n")
+
+
+def test_real_time_response_is_privileged_whatever_upstream_calls_it() -> None:
+    """CrowdStrike annotates `execute_rtr_read_only_command` read-only because
+    the *command* only reads. It is still an arbitrary command run on
+    somebody's host, which is the same argument that promotes Datadog's
+    `execute_code` and makes `pods/exec` outrank its verb.
+    """
+    assert manifest("crowdstrike").tools["falcon_execute_rtr_read_only_command"] == (
+        Sensitivity.MUTATE
+    ), "upstream's own reading, kept in [tools]"
+    assert classify("crowdstrike", "falcon_execute_rtr_read_only_command") is (
+        Sensitivity.PRIVILEGED
+    ), "and overridden, because the override is what ships"
+    for tool in ("falcon_init_rtr_session", "falcon_run_rtr_read_only_command_and_wait"):
+        assert classify("crowdstrike", tool) is Sensitivity.PRIVILEGED
+
+
+def test_a_control_that_disables_a_control_is_classed_with_what_it_disables() -> None:
+    """The Azure resource-lock argument, applied to an EDR: removing a lock is
+    how you get around a lock. An exclusion blinds the sensor and a prevention
+    policy action turns protection off on every host it covers."""
+    for tool in (
+        "falcon_create_exclusion",
+        "falcon_delete_exclusions",
+        "falcon_perform_policy_action",
+        "falcon_delete_policies",
+        "falcon_update_quarantined_files",
+    ):
+        assert classify("crowdstrike", tool) is Sensitivity.PRIVILEGED, tool
+
+
+def test_ordinary_crowdstrike_writes_are_not_escalated() -> None:
+    """The other half of the argument. Promoting everything to privileged is
+    challenge fatigue, which is how a challenge stops being read."""
+    assert classify("crowdstrike", "falcon_create_case") is Sensitivity.MUTATE
+    assert classify("crowdstrike", "falcon_update_detections") is Sensitivity.MUTATE
+    assert classify("crowdstrike", "falcon_search_vulnerabilities") is Sensitivity.READ
+
+
+def test_servicenow_cannot_have_a_name_manifest_and_says_so() -> None:
+    """Role-based tool packages mean one instance's tools are not another's.
+    That is Snowflake's situation, not GitHub's: not stale, impossible."""
+    spec = server_spec("servicenow")
+    assert spec is not None
+    assert manifest("servicenow").tools == {}
+    assert spec.unknown is Sensitivity.PRIVILEGED
+    assert "role-based" in spec.unknown_why
+    assert classify("servicenow", "anything_at_all") is Sensitivity.PRIVILEGED
+
+
+def test_servicenow_ships_no_endpoint_because_there_is_none_to_ship() -> None:
+    """The New Relic lesson: an invented endpoint is worse than none. The MCP
+    endpoint is a service record an administrator creates on their instance."""
+    spec = server_spec("servicenow")
+    assert spec is not None
+    assert spec.url == ""
+    assert "MCP Server Console" in spec.notes
+    assert "dynamic client registration" in spec.notes, "and why OAuth is not used"

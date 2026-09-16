@@ -27,6 +27,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import ast
 import base64
 import datetime as dt
 import json
@@ -46,6 +47,17 @@ MANIFESTS = Path(__file__).resolve().parent.parent / "src" / "altus" / "mcp" / "
 GITHUB_REF = "v1.12.1"
 GITHUB_REPO = "github/github-mcp-server"
 GITHUB_SNAPS = f"repos/{GITHUB_REPO}/contents/pkg/github/__toolsnaps__"
+
+FALCON_REF = "v0.19.0"
+FALCON_REPO = "CrowdStrike/falcon-mcp"
+FALCON_MODULES = "falcon_mcp/modules"
+
+#: falcon-mcp registers every tool as ``f"falcon_{name}"`` (modules/base.py).
+#: The module source declares ``search_detections``; the server publishes
+#: ``falcon_search_detections``. A manifest built from the unprefixed names
+#: would match nothing at all, which is a failure that looks exactly like a
+#: server with 166 unknown tools.
+FALCON_PREFIX = "falcon_"
 
 
 class RefreshError(RuntimeError):
@@ -139,9 +151,79 @@ def github_adapter() -> Generated:
     return Generated(tools=tools, target_fields=fields, upstream_ref=GITHUB_REF)
 
 
+def _falcon_sources(path: str) -> list[tuple[str, str]]:
+    """Every module under ``path``, recursing into the ``cloud`` subpackage."""
+    out: list[tuple[str, str]] = []
+    listing = _api(f"repos/{FALCON_REPO}/contents/{path}?ref={FALCON_REF}")
+    if not isinstance(listing, list) or not listing:
+        raise RefreshError(f"{path} is empty or missing --- has the layout moved?")
+    for entry in listing:
+        if entry.get("type") == "dir":
+            out += _falcon_sources(f"{path}/{entry['name']}")
+            continue
+        name = str(entry.get("name", ""))
+        if not name.endswith(".py") or name == "__init__.py":
+            continue
+        blob = _api(f"repos/{FALCON_REPO}/git/blobs/{entry['sha']}")
+        out.append((entry["path"], base64.b64decode(blob["content"]).decode("utf-8")))
+    return out
+
+
+def _keyword(call: ast.Call, name: str) -> ast.expr | None:
+    return next((k.value for k in call.keywords if k.arg == name), None)
+
+
+def crowdstrike_adapter() -> Generated:
+    """From the module sources --- ``self._add_tool(name=..., annotations=...)``.
+
+    Parsed as a syntax tree rather than with a regex, because the same modules
+    build ``TextResource(name=...)`` objects for their FQL guides. Those are
+    MCP *resources*, not tools, they go through a different method, and a
+    regex over ``name="..."`` would have swept every one of them into the tool
+    table.
+
+    The read/write split is the ``annotations`` argument, defaulting to
+    read-only exactly as ``_add_tool`` does (``annotations or
+    READ_ONLY_ANNOTATIONS``). It is a ceiling and not a floor: CrowdStrike
+    marks Real Time Response commands read-only because the *command* only
+    reads, and ``[overrides]`` promotes them back to privileged.
+    """
+    tools: dict[str, str] = {}
+    for path, text in _falcon_sources(FALCON_MODULES):
+        try:
+            tree = ast.parse(text)
+        except SyntaxError as exc:
+            raise RefreshError(f"{path} could not be parsed: {exc}") from exc
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if not (isinstance(node.func, ast.Attribute) and node.func.attr == "_add_tool"):
+                continue
+            name = _keyword(node, "name")
+            if not isinstance(name, ast.Constant) or not isinstance(name.value, str):
+                raise RefreshError(f"{path}: a tool name is not a literal --- cannot derive it")
+            notes = _keyword(node, "annotations")
+            read_only = True
+            if notes is not None:
+                if not isinstance(notes, ast.Call):
+                    raise RefreshError(f"{path}: {name.value} annotations are not a literal call")
+                hint = _keyword(notes, "readOnlyHint")
+                read_only = bool(hint.value) if isinstance(hint, ast.Constant) else True
+            tools[f"{FALCON_PREFIX}{name.value}"] = "read" if read_only else "mutate"
+
+    # `target_fields` is empty on purpose, and it is the one manifest where
+    # that is a finding rather than an omission. Every identifying argument
+    # Falcon takes is an opaque id --- `ids`, `session_id`, `policy_type` ---
+    # so a `*prod*` pattern would match nothing. The blast radius of a Falcon
+    # call is the tenant, which is named by FALCON_BASE_URL and not by any
+    # argument, so protection is matched on the configured scope instead.
+    return Generated(tools=tools, target_fields=(), upstream_ref=FALCON_REF)
+
+
 #: Servers with no machine-readable upstream. Left exactly as written, and
 #: reported as such, rather than being quietly refreshed from nothing.
 NO_ADAPTER = {
+    "servicenow": "tool names come from the instance's own role-based tool packages",
     "atlassian": "Atlassian publishes permission scopes, not tool names",
     "snowflake": "tool names are chosen per deployment by whoever created the server object",
     "databricks": "tool names are the customer's own Genie spaces, indexes and UDFs",
@@ -150,7 +232,7 @@ NO_ADAPTER = {
     "newrelic": "tools are published as a documentation table; no machine-readable artifact",
 }
 
-ADAPTERS: dict[str, Any] = {"github": github_adapter}
+ADAPTERS: dict[str, Any] = {"github": github_adapter, "crowdstrike": crowdstrike_adapter}
 
 
 # --------------------------------------------------------------------- writing

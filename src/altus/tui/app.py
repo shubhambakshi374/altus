@@ -55,7 +55,7 @@ class AltusApp(App[None]):
         )
         self.approvals = SessionApprovals(AllowAll() if auto_approve else InteractiveApproval(self))
         self.tool_ctx: ToolContext = build_tool_context(
-            self.config, self.workspace, approvals=self.approvals
+            self.config, self.workspace, approvals=self.approvals, registry=self.registry
         )
         self.tools_enabled = self.config.tools.enabled and not no_tools
         self.commands: CommandRegistry = build_registry()
@@ -196,6 +196,18 @@ class AltusApp(App[None]):
         screen = self.screen
         if isinstance(screen, ChatScreen):
             await screen.action_new_session()
+
+    async def ask_from_command(self, text: str) -> bool:
+        """Start a turn with ``text`` as if the user had typed it.
+
+        How ``/workflow new`` hands the conversation over to the model. False
+        when there is no chat screen to hand it to.
+        """
+        screen = self.screen
+        if not isinstance(screen, ChatScreen):
+            return False
+        await screen.ask(text)
+        return True
 
     def on_mount(self) -> None:
         self.theme = self.config.ui.theme

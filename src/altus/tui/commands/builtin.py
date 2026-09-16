@@ -568,8 +568,70 @@ async def cmd_workflow(app: AltusApp, args: list[str]) -> CommandResult:
     if not settings.enabled:
         return CommandResult.warn("Workflows are disabled ([workflow] enabled = false).")
 
+    if args and args[0] == "new":
+        return await _draft_workflow(app, " ".join(args[1:]))
+
     open_designer(app, args[0] if args else "", settings)
     return CommandResult.silent()
+
+
+async def _draft_workflow(app: AltusApp, wanted: str) -> CommandResult:
+    """Hand the conversation to the model, with the one tool that can save.
+
+    ``workflow_save`` is registered here rather than in ``default_registry``
+    because a tool that writes executable workflow files has no business
+    sitting in the list for every unrelated turn. It takes itself back out
+    once a workflow is saved.
+    """
+    from altus.tools.workflow import WorkflowSaveTool
+
+    settings = app.config.workflow
+    if not settings.allow_model_authoring:
+        return CommandResult.error(
+            "[workflow] allow_model_authoring is false, so workflows are written "
+            "by hand here. Open the designer with /workflow."
+        )
+    if not app.session.tools_enabled or not app.session.model_supports_tools:
+        return CommandResult.error(
+            "Drafting needs tool calling, which this session does not have. "
+            "Open the designer with /workflow instead."
+        )
+
+    app.registry.add(WorkflowSaveTool())
+    if not await app.ask_from_command(_brief(app, wanted)):
+        app.registry.remove("workflow_save")
+        return CommandResult.error("there is no conversation to hand this to")
+    return CommandResult.silent()
+
+
+def _brief(app: AltusApp, wanted: str) -> str:
+    """What the model is being asked to do, in the user's own voice.
+
+    It goes in as a user message rather than a system prompt because it *is*
+    one turn's request, not a standing instruction --- and because the user can
+    then see, scroll back to, and argue with the thing the model was told.
+    """
+    asked = wanted.strip()
+    opening = (
+        f"I want to build a workflow: {asked}"
+        if asked
+        else "I want to build a workflow. Ask me what it should do."
+    )
+    return (
+        f"{opening}\n\n"
+        "A workflow is an ordered set of steps I can run later. Three kinds:\n"
+        "- tool: calls one registered tool with arguments\n"
+        "- agent: gives you a prompt, and optionally a narrowed list of tools\n"
+        "- approval: stops so a human decides whether the rest runs\n\n"
+        "Steps depend on each other through `needs`, not through their order.\n"
+        "Name the tools on every agent step you can: an agent step with no "
+        "tools listed may use any of them, which makes it as dangerous as the "
+        "worst tool I have.\n\n"
+        "Ask me whatever you need, propose the steps in prose first, and call "
+        "workflow_save once I have agreed to them. I will be asked to approve "
+        "the file before it is written. Saving does not run anything.\n\n"
+        f"Tools available: {', '.join(app.registry.names)}."
+    )
 
 
 async def cmd_graphics(app: AltusApp, args: list[str]) -> CommandResult:
@@ -666,7 +728,7 @@ def build_registry() -> CommandRegistry:
         Command(
             "workflow",
             "Design a multi-step workflow",
-            "workflow [<name>]",
+            "workflow [<name> | new <what it should do>]",
             cmd_workflow,
             aliases=("workflows",),
         ),

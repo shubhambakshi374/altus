@@ -37,6 +37,18 @@ class ToolRegistry:
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)
 
+    def add(self, tool: Tool) -> None:
+        """Offer a tool for part of a session.
+
+        ``workflow_save`` is registered only while the user is drafting one,
+        because a tool that writes executable workflow files should not sit in
+        the list for every unrelated turn.
+        """
+        self._tools[tool.name] = tool
+
+    def remove(self, name: str) -> bool:
+        return self._tools.pop(name, None) is not None
+
     def is_read_only(self, name: str) -> bool:
         """Unknown tools count as mutating, so they take the cautious path."""
         tool = self._tools.get(name)

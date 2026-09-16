@@ -136,6 +136,22 @@ class ChatScreen(Screen[None]):
         await self.query_one(MessageList).add_message(message)
         self.run_turn()
 
+    async def ask(self, text: str) -> None:
+        """Put ``text`` in as a user message and run a turn.
+
+        The route a command takes when it wants the model to carry on the
+        conversation --- ``/workflow new`` hands over this way rather than
+        making the user retype what they already told the command.
+        """
+        if self._turn_active:
+            self.notify("Still working — press Ctrl+C to cancel.", severity="warning")
+            return
+        app = self.altus
+        message = Message.user(text)
+        app.session.append(message)
+        await self.query_one(MessageList).add_message(message)
+        self.run_turn()
+
     @work(group="command")
     async def run_command(self, text: str) -> None:
         """Commands can await modals, so they run in a worker like turns do."""
@@ -302,6 +318,9 @@ class ChatScreen(Screen[None]):
             return
         app = self.altus
         app.start_new_session()
+        # A drafting session abandoned without saving must not leave
+        # workflow_save registered for whatever comes next.
+        app.registry.remove("workflow_save")
         self.query_one(MessageList).clear_messages()
         self._tools.clear()
         status = self.query_one(StatusBar)

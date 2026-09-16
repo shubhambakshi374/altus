@@ -436,3 +436,176 @@ async def test_the_tool_picker_shows_what_each_tool_costs(registry: ToolRegistry
     rows = dict(picker.rows)
     assert rows["k8s_topology"] == "read"
     assert rows["k8s_apply"] == "mutate — arguments decide"
+
+
+# --------------------------------------------------- conversational drafting
+
+
+def make_ctx(registry: ToolRegistry, policy=None, settings=None):  # type: ignore[no-untyped-def]
+    from altus.config.models import WorkflowSettings
+    from altus.tools.approval import RecordingPolicy
+    from altus.workspace import Workspace
+
+    return ToolContext(
+        workspace=Workspace(root=__import__("pathlib").Path.cwd()),
+        approvals=policy or RecordingPolicy(),
+        registry=registry,
+        workflow_settings=settings or WorkflowSettings(),
+    )
+
+
+def draft(**over):  # type: ignore[no-untyped-def]
+    payload = {
+        "name": "nightly",
+        "steps": [
+            {"id": "look", "kind": "tool", "tool": "k8s_topology"},
+            {"id": "ask", "kind": "approval", "needs": ["look"], "message": "ok?"},
+        ],
+    }
+    payload.update(over)
+    return payload
+
+
+async def test_saving_a_drafted_workflow_asks_first_and_shows_the_whole_file(
+    registry: ToolRegistry,
+) -> None:
+    """Approving a workflow is approving every action queued inside it, so the
+    request carries the file itself rather than a summary of it."""
+    from altus.tools.approval import RecordingPolicy
+    from altus.tools.workflow import WorkflowSaveTool
+
+    policy = RecordingPolicy()
+    ctx = make_ctx(registry, policy)
+    outcome = await WorkflowSaveTool().run(draft(), ctx)
+
+    assert not outcome.is_error
+    (request,) = policy.seen
+    assert "k8s_topology" in request.diff
+    assert "does not run anything" in request.dry_run
+    assert load("nightly").ids == ["look", "ask"]
+
+
+async def test_a_declined_save_writes_nothing(registry: ToolRegistry) -> None:
+    from altus.tools.approval import Decision, RecordingPolicy
+    from altus.tools.workflow import WorkflowSaveTool
+
+    ctx = make_ctx(registry, RecordingPolicy(decision=Decision.DENY))
+    outcome = await WorkflowSaveTool().run(draft(), ctx)
+
+    assert outcome.denied
+    assert list_workflows() == []
+
+
+async def test_a_privileged_workflow_demands_the_typed_challenge(
+    registry: ToolRegistry,
+) -> None:
+    """The point of rolling the level up. A drafted workflow containing a
+    privileged step is as serious as calling that step directly, and the gate
+    has to treat it that way or the file becomes a way around the gate."""
+    from altus.tools.approval import RecordingPolicy
+    from altus.tools.workflow import WorkflowSaveTool
+
+    policy = RecordingPolicy()
+    ctx = make_ctx(registry, policy)
+    await WorkflowSaveTool().run(
+        draft(steps=[{"id": "shell", "kind": "tool", "tool": "k8s_exec"}]), ctx
+    )
+
+    (request,) = policy.seen
+    assert request.sensitivity is Sensitivity.PRIVILEGED
+    assert request.needs_challenge
+    assert not request.may_grant_always
+
+
+async def test_an_unrunnable_workflow_is_refused_rather_than_saved(
+    registry: ToolRegistry,
+) -> None:
+    """A broken workflow sitting on disk looking finished is worse than one
+    that was never written, and the model can fix this without the user."""
+    from altus.tools.approval import RecordingPolicy
+    from altus.tools.workflow import WorkflowSaveTool
+
+    policy = RecordingPolicy()
+    ctx = make_ctx(registry, policy)
+    outcome = await WorkflowSaveTool().run(
+        draft(steps=[{"id": "a", "kind": "tool", "tool": "no_such_tool"}]), ctx
+    )
+
+    assert outcome.is_error
+    assert policy.seen == [], "and the user is not asked about it"
+    assert list_workflows() == []
+
+
+async def test_a_name_that_would_escape_the_directory_is_refused(
+    registry: ToolRegistry,
+) -> None:
+    """Reachable by a prompt: the model chooses this string."""
+    from altus.tools.approval import RecordingPolicy
+    from altus.tools.workflow import WorkflowSaveTool
+
+    policy = RecordingPolicy()
+    outcome = await WorkflowSaveTool().run(
+        draft(name="../../../.ssh/authorized_keys"), make_ctx(registry, policy)
+    )
+    assert outcome.is_error
+    assert policy.seen == []
+
+
+async def test_authoring_can_be_switched_off_entirely(registry: ToolRegistry) -> None:
+    from altus.config.models import WorkflowSettings
+    from altus.tools.approval import RecordingPolicy
+    from altus.tools.workflow import WorkflowSaveTool
+
+    policy = RecordingPolicy()
+    ctx = make_ctx(registry, policy, WorkflowSettings(allow_model_authoring=False))
+    outcome = await WorkflowSaveTool().run(draft(), ctx)
+
+    assert outcome.is_error
+    assert policy.seen == []
+
+
+async def test_the_tool_takes_itself_back_out_once_a_workflow_is_saved(
+    registry: ToolRegistry,
+) -> None:
+    """Otherwise one `/workflow new` widens the tool list for the rest of the
+    session, which is the thing registering it late was meant to avoid."""
+    from altus.tools.workflow import WorkflowSaveTool
+
+    registry.add(WorkflowSaveTool())
+    assert "workflow_save" in registry
+    await WorkflowSaveTool().run(draft(), make_ctx(registry))
+    assert "workflow_save" not in registry
+
+
+async def test_workflow_new_registers_the_tool_and_hands_over_the_turn() -> None:
+    from altus.tui.commands import dispatch
+
+    app = make_app()
+    async with app.run_test() as pilot:
+        asked: list[str] = []
+
+        async def fake_ask(text: str) -> bool:
+            asked.append(text)
+            return True
+
+        app.ask_from_command = fake_ask  # type: ignore[method-assign]
+        await dispatch(app, app.commands, "/workflow new deploy the API to staging")
+        await pilot.pause()
+
+        assert "workflow_save" in app.registry
+        assert "deploy the API to staging" in asked[0]
+        assert "workflow_save" in asked[0], "and it is told how to finish"
+
+
+async def test_starting_a_new_session_drops_the_drafting_tool() -> None:
+    from altus.tools.workflow import WorkflowSaveTool
+    from altus.tui.screens.chat import ChatScreen
+
+    app = make_app()
+    async with app.run_test() as pilot:
+        app.registry.add(WorkflowSaveTool())
+        screen = app.screen
+        assert isinstance(screen, ChatScreen)
+        await screen.action_new_session()
+        await pilot.pause()
+        assert "workflow_save" not in app.registry

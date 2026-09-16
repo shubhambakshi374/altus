@@ -109,6 +109,14 @@ class ToolContext:
     workspace: Workspace
     approvals: ApprovalPolicy = field(default_factory=DenyAll)
     cloud: CloudContext = field(default_factory=lambda: CloudContext())
+    workflow_settings: Any = None
+    """An ``altus.config.models.WorkflowSettings``. Not under ``cloud``: a
+    workflow is not a cloud, and MCP's settings only live there because they
+    were put there before that distinction was worth making."""
+    registry: Any = None
+    """The session's ``ToolRegistry``, for the one tool that has to reason
+    about the others. Typed loosely because ``tools.registry`` imports this
+    module. None means a caller that never needed it."""
     max_file_bytes: int = DEFAULT_MAX_FILE_BYTES
     max_lines: int = DEFAULT_MAX_LINES
     max_entries: int = DEFAULT_MAX_ENTRIES

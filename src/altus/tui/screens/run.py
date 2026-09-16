@@ -24,7 +24,13 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import Input, Label, Static
 
 from altus.core.errors import ConfigError
-from altus.workflow import Workflow, blast_radius, describe, run_workflow
+from altus.workflow import (
+    Workflow,
+    blast_radius,
+    describe,
+    resume_workflow,
+    run_workflow,
+)
 from altus.workflow.engine import RunRefused
 
 MARKS = {
@@ -67,18 +73,24 @@ class RunScreen(Screen[None]):
         *,
         settings: Any = None,
         given: dict[str, str] | None = None,
+        resume: str = "",
     ) -> None:
         super().__init__()
         self.workflow = workflow
         self.settings = settings
         self.given = dict(given or {})
-        self.run_id = ""
+        self.resume = resume
+        """A parked run this screen is picking up. The same screen and the same
+        gates on purpose: a resumed step is approved exactly as a fresh one is,
+        and a second screen would be a second place for that to drift."""
+        self.run_id = resume
         self.finished = False
 
     def compose(self) -> ComposeResult:
         radius = blast_radius(self.workflow, getattr(self.app, "registry", None) or ())
         with Vertical():
-            yield Label(Content(f"Running {self.workflow.name}"), classes="title")
+            verb = "Resuming" if self.resume else "Running"
+            yield Label(Content(f"{verb} {self.workflow.name}"), classes="title")
             yield Static(
                 "\n".join([radius.render(), *(f"  {note}" for note in radius.notes())]),
                 classes="hint",
@@ -131,28 +143,33 @@ class RunScreen(Screen[None]):
             self.finished = True
             return
 
-        # Asked for before the gate, never after: an approval prompt showing
-        # `${inputs.repo}` where the target should be is approving nothing.
-        try:
-            values = await self._inputs()
-        except ConfigError as exc:
-            self._say(str(exc), "step-failed")
-            self.finished = True
-            return
-        if values is None:
-            self._say("cancelled", "step-skipped")
-            self.finished = True
-            return
+        values: dict[str, str] | None = {}
+        if not self.resume:
+            # Asked for before the gate, never after: an approval prompt showing
+            # `${inputs.repo}` where the target should be is approving nothing.
+            # A resume asks for nothing --- its inputs are in the record, and
+            # re-resolving them could quietly point the run somewhere else.
+            try:
+                values = await self._inputs()
+            except ConfigError as exc:
+                self._say(str(exc), "step-failed")
+                self.finished = True
+                return
+            if values is None:
+                self._say("cancelled", "step-skipped")
+                self.finished = True
+                return
 
         details = {step.id: describe(step) for step in self.workflow.steps}
-        stream = run_workflow(
-            self.workflow,
-            registry,
-            ctx,
-            provider=getattr(app, "provider", None),
-            session=getattr(app, "session", None),
-            confirm=self._confirm,
-            inputs=values,
+        common: dict[str, Any] = {
+            "provider": getattr(app, "provider", None),
+            "session": getattr(app, "session", None),
+            "confirm": self._confirm,
+        }
+        stream = (
+            resume_workflow(self.resume, self.workflow, registry, ctx, **common)
+            if self.resume
+            else run_workflow(self.workflow, registry, ctx, inputs=values, **common)
         )
         try:
             # aclosing so a cancelled run is closed here rather than whenever
@@ -187,7 +204,7 @@ class RunScreen(Screen[None]):
 
     def _apply(self, event: Any, details: dict[str, str]) -> None:
         match event.type:
-            case "run_started":
+            case "run_started" | "run_resumed":
                 self.run_id = event.run_id
                 self._say(f"run {event.run_id}")
             case "step_started":
@@ -206,6 +223,13 @@ class RunScreen(Screen[None]):
                 tries = f" over {event.attempts} attempts" if event.attempts > 1 else ""
                 extra = f"{event.summary}  {event.seconds}s{tries}"
                 self._set(event.step, state, details.get(event.step, ""), extra)
+            case "step_parked":
+                self._set(
+                    event.step,
+                    "waiting",
+                    details.get(event.step, ""),
+                    f"waiting for approval to {event.action} {event.path or event.target}",
+                )
             case "step_skipped":
                 self._set(event.step, "skipped", details.get(event.step, ""), event.reason)
             case "run_finished":
@@ -219,6 +243,7 @@ class RunScreen(Screen[None]):
             "failed": "Stopped by a failure",
             "denied": "Stopped: declined",
             "cancelled": "Stopped: interrupted",
+            "parked": "Waiting for approval",
         }
         lines = [
             f"{words.get(event.state, event.state)} — {event.ran} steps ran, "
@@ -227,6 +252,8 @@ class RunScreen(Screen[None]):
         if event.detail:
             lines.append(f"  {event.detail}")
         lines.append(f"  record: {runs_dir() / (event.run_id + '.jsonl')}")
+        if event.state == "parked":
+            lines.append(f"  /workflow resume {event.run_id} to approve and carry on")
         self._say("\n".join(lines), "step-ok" if event.state == "completed" else "step-failed")
 
     async def _confirm(self, started: Any, workflow: Workflow) -> bool:

@@ -43,6 +43,11 @@ KEY_ORDER = {
 }
 
 
+#: The same idea for a `[[triggers]]` block: what it is, then how often, then
+#: what it looks at.
+TRIGGER_ORDER = {"kind": 0, "every": 1, "tool": 10, "args": 11, "into": 12}
+
+
 def workflows_dir(settings: Any = None) -> Path:
     """``[workflow] dir``, or ``<config>/workflows``."""
     override = getattr(settings, "dir", "") if settings is not None else ""
@@ -87,6 +92,12 @@ def render(workflow: Workflow) -> str:
             for name, spec in workflow.inputs.items()
         }
     out = tomli_w.dumps(payload).rstrip()
+    for trigger in workflow.triggers:
+        # Before the steps, because once a [[steps]] block is open every later
+        # key belongs to it.
+        entry = trigger.model_dump(mode="json", exclude_defaults=True)
+        entry.setdefault("kind", trigger.kind)
+        out += "\n\n" + _table("triggers", entry, TRIGGER_ORDER)
     for step in workflow.steps:
         # exclude_defaults keeps an empty `needs` or `args` out of the file, so
         # a hand-written workflow stays as short as the author wrote it.
@@ -118,8 +129,12 @@ def _step_toml(entry: dict[str, Any]) -> str:
     either way depending on whether a step had a `needs` entry. This is the
     format people read, diff and commit, and it should not shift under them.
     """
-    lines = ["[[steps]]"]
-    ordered = sorted(entry.items(), key=lambda item: (KEY_ORDER.get(item[0], 50), item[0]))
+    return _table("steps", entry, KEY_ORDER)
+
+
+def _table(name: str, entry: dict[str, Any], order: dict[str, int]) -> str:
+    lines = [f"[[{name}]]"]
+    ordered = sorted(entry.items(), key=lambda item: (order.get(item[0], 50), item[0]))
     lines += [f"{key} = {_value(value)}" for key, value in ordered]
     return "\n".join(lines)
 

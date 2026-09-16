@@ -535,9 +535,38 @@ def _start_run(app: AltusApp, name: str, given: dict[str, str]) -> CommandResult
     return CommandResult.silent()
 
 
+def _resume_run(app: AltusApp, run_id: str) -> CommandResult:
+    """Pick up a run that parked, on the screen that ran it the first time.
+
+    The same screen and the same gates: a resumed step is approved exactly as a
+    fresh one is, and a second, quieter path to approving a queued mutation is
+    the last thing this should grow.
+    """
+    from altus.core.errors import ConfigError
+    from altus.tui.screens.run import RunScreen
+    from altus.workflow import read_run, resumable
+
+    try:
+        events = read_run(run_id)
+    except FileNotFoundError as exc:
+        return CommandResult.error(str(exc))
+    start = next((event for event in events if event.type == "run_started"), None)
+    if start is None:
+        return CommandResult.error(f"{run_id} has no beginning, so there is nothing to resume")
+    try:
+        workflow = _load(app, start.workflow)
+    except ConfigError as exc:
+        return CommandResult.error(str(exc))
+    problem = resumable(events, workflow)
+    if problem:
+        return CommandResult.error(f"{run_id} cannot be resumed: {problem}")
+    app.push_screen(RunScreen(workflow, settings=app.config.workflow, resume=run_id))
+    return CommandResult.silent()
+
+
 def _past_runs(app: AltusApp, run_id: str) -> CommandResult:
     """What has been run, and what happened --- the point of keeping a record."""
-    from altus.workflow import list_runs, read_run, runs_dir, summarise
+    from altus.workflow import is_parked, list_runs, read_run, runs_dir, summarise
 
     if run_id:
         try:
@@ -553,9 +582,15 @@ def _past_runs(app: AltusApp, run_id: str) -> CommandResult:
     if not ids:
         return CommandResult(f"No runs recorded yet in {runs_dir()}.", title="Runs")
     rows = ["Runs, newest first:"]
+    waiting = 0
     for found in ids:
-        rows.append(f"  {found:<26} {summarise(read_run(found))}")
+        events = read_run(found)
+        mark = " ⏸" if is_parked(events) else ""
+        waiting += bool(mark)
+        rows.append(f"  {found:<26} {summarise(events)}{mark}")
     rows.append("\n  /workflow runs <id> for one of them")
+    if waiting:
+        rows.append("  ⏸ waiting for approval — /workflow resume <id> to carry on")
     return CommandResult("\n".join(rows), title="Runs")
 
 
@@ -565,6 +600,11 @@ def _run_line(event: Any) -> str:
             return f"  ▸ {event.step:<18} {event.kind:<9} {event.detail}"
         case "step_finished":
             return f"    {'ok' if event.ok else 'FAILED'}: {event.summary}  ({event.seconds}s)"
+        case "step_parked":
+            return (
+                f"  ⏸ {event.step:<18} waiting — needs approval to "
+                f"{event.action} {event.path or event.target}"
+            )
         case "step_skipped":
             return f"  ~ {event.step:<18} skipped — {event.reason}"
         case _:
@@ -656,6 +696,10 @@ async def cmd_workflow(app: AltusApp, args: list[str]) -> CommandResult:
         if not rest:
             return CommandResult.error("usage: /workflow run <name> [name=value ...]")
         return _start_run(app, rest[0], _pairs(rest[1:]))
+    if verb == "resume":
+        if not rest:
+            return CommandResult.error("usage: /workflow resume <run id>")
+        return _resume_run(app, rest[0])
     if verb in {"show", "validate", "path"}:
         if not rest:
             return CommandResult.error(f"usage: /workflow {verb} <name>")
@@ -696,7 +740,8 @@ def _list_workflows(app: AltusApp) -> CommandResult:
         # A workflow that cannot run showing a calm "read" here would be the
         # list quietly disagreeing with /workflow validate.
         broken = " ✗ will not run" if fatal(check(workflow, app.registry)) else ""
-        rows.append(f"  {name:<20} {steps:<10} {radius.render()}{broken}")
+        auto = " ⏱" if workflow.triggers else ""
+        rows.append(f"  {name:<20} {steps:<10} {radius.render()}{auto}{broken}")
     rows.append("\n  /workflow <name> to open one · /workflow show <name> to print it")
     return CommandResult("\n".join(rows), title="Workflows")
 
@@ -740,7 +785,16 @@ def _one_workflow(app: AltusApp, verb: str, name: str) -> CommandResult:
                 extra = f"  default {spec.default}" if spec.default else ""
                 need = "  required" if spec.required and not spec.default else ""
                 rows.append(f"  {key:<16} {shown}{extra}{need}")
+        if workflow.triggers:
+            rows.append("")
+            rows.append("Starts by itself:")
+            for number, trigger in enumerate(workflow.triggers, 1):
+                rows.append(f"  {number:<16} {trigger.describe()}")
+            rows.append("  (altus workflow serve watches these; a run they start parks")
+            rows.append("   at anything needing approval rather than guessing)")
         rows += ["", radius.render(), *(f"  {note}" for note in radius.notes())]
+        if workflow.parallel > 1:
+            rows.append(f"  up to {workflow.parallel} steps run at once")
         if problems:
             rows += ["", "Problems:", *(problem.render() for problem in problems)]
         rows.append("\n  /workflow validate " + name + " · /workflow path " + name)
@@ -945,7 +999,7 @@ def build_registry() -> CommandRegistry:
         Command(
             "workflow",
             "Design a multi-step workflow",
-            "workflow [<name> | new | templates | list | show | validate | run | runs]",
+            "workflow [<name> | new | list | show | run | runs | resume | templates]",
             cmd_workflow,
             aliases=("workflows",),
         ),

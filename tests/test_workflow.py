@@ -849,3 +849,109 @@ def test_the_step_form_can_express_all_three_tool_states() -> None:
     assert _parse_tools("read_file, grep") == ["read_file", "grep"]
     assert _tools_text(AgentStep(id="a", prompt="p")) == ""
     assert _tools_text(AgentStep(id="a", prompt="p", tools=[])) == "none"
+
+
+# ------------------------------------------------------- parking, in the TUI
+
+
+async def parked_record(app, tmp_path) -> str:  # type: ignore[no-untyped-def]
+    """Run a workflow unattended so there is something waiting for a person."""
+    from altus.tools.approval import ParkOnApproval
+    from altus.tools.base import ToolContext
+    from altus.workflow import run_workflow
+    from altus.workspace import Workspace
+
+    workflow = Workflow(
+        name="park",
+        steps=[ToolStep(id="write", tool="write_file", args={"path": "x.txt", "content": "hi"})],
+    )
+    await seed(app, workflow)
+    ctx = ToolContext(workspace=Workspace(root=tmp_path), approvals=ParkOnApproval())
+    run_id = ""
+    async for event in run_workflow(workflow, app.registry, ctx):
+        if event.type == "run_started":
+            run_id = event.run_id
+    return run_id
+
+
+async def test_the_run_list_marks_what_is_waiting_for_a_person(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    app = make_app()
+    async with app.run_test():
+        app.registry = default_registry(
+            kubernetes=False, aws=False, azure=False, gcp=False, mcp=False
+        )  # type: ignore[assignment]
+        await parked_record(app, tmp_path)
+        result = await dispatch_command(app, "/workflow runs")
+
+    assert "⏸" in result.body
+    assert "/workflow resume" in result.body
+
+
+async def test_resume_opens_the_same_screen_the_run_used(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """The same screen and the same gates: a resumed step is approved exactly
+    as a fresh one is."""
+    from altus.tui.screens.run import RunScreen
+
+    app = make_app()
+    async with app.run_test() as pilot:
+        app.registry = default_registry(
+            kubernetes=False, aws=False, azure=False, gcp=False, mcp=False
+        )  # type: ignore[assignment]
+        run_id = await parked_record(app, tmp_path)
+        await dispatch_command(app, f"/workflow resume {run_id}")
+        await pilot.pause()
+
+        assert any(isinstance(screen, RunScreen) for screen in app.screen_stack)
+        screen = next(s for s in app.screen_stack if isinstance(s, RunScreen))
+        assert screen.resume == run_id
+
+
+async def test_resuming_something_that_is_not_parked_says_so(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from altus.tools.approval import AllowAll
+    from altus.tools.base import ToolContext
+    from altus.workflow import run_workflow
+    from altus.workspace import Workspace
+
+    app = make_app()
+    async with app.run_test():
+        app.registry = default_registry(
+            kubernetes=False, aws=False, azure=False, gcp=False, mcp=False
+        )  # type: ignore[assignment]
+        workflow = Workflow(name="fine", steps=[ToolStep(id="look", tool="list_dir", args={})])
+        await seed(app, workflow)
+        ctx = ToolContext(workspace=Workspace(root=tmp_path), approvals=AllowAll())
+        run_id = ""
+        async for event in run_workflow(workflow, app.registry, ctx):
+            if event.type == "run_started":
+                run_id = event.run_id
+        result = await dispatch_command(app, f"/workflow resume {run_id}")
+
+    assert result.severity == "error"
+    assert "not parked" in result.body
+
+
+async def test_show_says_what_starts_a_workflow_by_itself() -> None:
+    from altus.workflow.models import Input, Trigger
+
+    app = make_app()
+    async with app.run_test():
+        app.registry = default_registry(
+            kubernetes=False, aws=False, azure=False, gcp=False, mcp=False
+        )  # type: ignore[assignment]
+        await seed(
+            app,
+            Workflow(
+                name="sweep",
+                parallel=2,
+                inputs={"found": Input(description="what changed")},
+                triggers=[
+                    Trigger(kind="watch", every="15m", tool="list_dir", args={}, into="found")
+                ],
+                steps=[ToolStep(id="look", tool="list_dir", args={})],
+            ),
+        )
+        result = await dispatch_command(app, "/workflow show sweep")
+
+    assert "Starts by itself:" in result.body
+    assert "every 15m" in result.body
+    assert "up to 2 steps run at once" in result.body

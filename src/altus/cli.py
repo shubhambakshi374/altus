@@ -16,6 +16,7 @@ import typer
 
 from altus import __version__
 from altus.agent import build_tool_context, build_workspace, run_agent
+from altus.cli_workflow import app as workflow_app
 from altus.config import (
     config_path,
     load_config,
@@ -58,6 +59,7 @@ app.add_typer(sessions_app, name="sessions")
 app.add_typer(tools_app, name="tools")
 app.add_typer(cloud_app, name="cloud")
 app.add_typer(kube_app, name="kube")
+app.add_typer(workflow_app, name="workflow")
 
 
 def _fail(message: str) -> None:

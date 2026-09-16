@@ -55,6 +55,7 @@ def check(workflow: Workflow, registry: Any) -> list[Problem]:
     if not cycles:
         found += _bad_references(workflow)
     found += _bad_waits(workflow, registry)
+    found += _bad_triggers(workflow, registry)
     return found
 
 
@@ -262,6 +263,49 @@ def _bad_waits(workflow: Workflow, registry: Any) -> list[Problem]:
                     f"{step.tool} is {level.value}, and a waiting step is called "
                     "repeatedly --- poll a read instead",
                     step.id,
+                )
+            )
+    return found
+
+
+# ------------------------------------------------------------------- triggers
+
+
+def _bad_triggers(workflow: Workflow, registry: Any) -> list[Problem]:
+    """A trigger polls forever and starts runs nobody is watching.
+
+    Both halves of that are checked here rather than at the gate. The tool a
+    ``watch`` polls must be a read --- the same rule and the same reason as a
+    waiting step --- and the input it seeds must be one the workflow actually
+    declares, or the run would start with a value it has no way to use.
+    """
+    from altus.tools.base import sensitivity_of
+
+    declared = set(getattr(workflow, "inputs", {}) or {})
+    found: list[Problem] = []
+    for number, trigger in enumerate(getattr(workflow, "triggers", ()) or (), 1):
+        where = f"trigger {number}"
+        if trigger.kind != "watch":
+            continue
+        if trigger.into not in declared:
+            found.append(
+                Problem(
+                    f"watches into {trigger.into!r}, which this workflow does not declare "
+                    "as an input",
+                    where,
+                )
+            )
+        tool = registry.get(trigger.tool) if registry is not None else None
+        if tool is None:
+            found.append(Problem(f"no tool called {trigger.tool!r} is registered here", where))
+            continue
+        level = sensitivity_of(tool)
+        if level.needs_approval:
+            found.append(
+                Problem(
+                    f"{trigger.tool} is {level.value}, and a watch calls it forever "
+                    "--- watch a read instead",
+                    where,
                 )
             )
     return found

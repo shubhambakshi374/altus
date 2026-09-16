@@ -152,6 +152,38 @@ class AzureSettings(BaseModel):
     given the chance, and the model pays for every row."""
 
 
+class GcpSettings(BaseModel):
+    """Which classes of GCP capability this machine offers.
+
+    Like the AWS and Azure switches, most of these cannot work by withholding a
+    tool: the same ``gcp_write`` sets a label and a bucket's IAM policy. They
+    are checked at the approval gate instead.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    allow_writes: bool = True
+    """Any mutating call at all."""
+    allow_iam_writes: bool = True
+    """setIamPolicy, service-account keys, KMS, Resource Manager --- the calls
+    that decide who may do what. setIamPolicy alone is how a bucket becomes
+    world-readable and how anyone grants themselves owner."""
+    allow_delete: bool = True
+    """The destructive verbs."""
+    allow_cli: bool = True
+    """The `gcloud` fallback, when the native gcp_* tools cannot express it."""
+    billing_export_table: str = ""
+    """`project.dataset.gcp_billing_export_v1_XXXXXX`.
+
+    GCP has no spend API --- Cloud Billing exposes account metadata and SKU
+    pricing and not a cent of actual cost --- so real spend lives only in a
+    BigQuery export you configure yourself. Empty means gcp_cost says so and
+    falls back to listing budgets rather than inventing a number."""
+    max_results: int = 500
+    """Rows returned from one call. Paginators will walk a whole project, and
+    the model pays for every row."""
+
+
 class CloudSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -182,6 +214,10 @@ class CloudSettings(BaseModel):
         return "altus" if value == "wai" else value
 
     default_region: str | None = None
+    gcp_project: str | None = None
+    """The GCP project Altus acts in. ADC often sees many, and every tool acts
+    in exactly one --- so that the blast radius named in a prompt is the one
+    that is actually touched."""
     azure_subscription: str | None = None
     """The Azure subscription Altus acts in. One credential commonly sees many,
     and every tool acts in exactly one --- so that the blast radius named in a
@@ -195,6 +231,7 @@ class CloudSettings(BaseModel):
     k8s: K8sSettings = Field(default_factory=K8sSettings)
     aws: AwsSettings = Field(default_factory=AwsSettings)
     azure: AzureSettings = Field(default_factory=AzureSettings)
+    gcp: GcpSettings = Field(default_factory=GcpSettings)
 
 
 class UISettings(BaseModel):

@@ -332,6 +332,15 @@ def build_cloud_context(config: Config) -> CloudContext:
             max_results=settings.azure.max_results,
         )
 
+    gcp_provider = None
+    gcp_entry = integration("gcp")
+    if gcp_entry and gcp_entry.available:
+        from altus.cloud.gcp import GcpProvider
+
+        gcp_provider = GcpProvider(
+            project=settings.gcp_project or "", max_results=settings.gcp.max_results
+        )
+
     forwards = None
     if provider is not None and settings.k8s.allow_port_forward:
         from altus.tools.k8s.streams import PortForwards
@@ -363,6 +372,9 @@ def build_cloud_context(config: Config) -> CloudContext:
         azure=azure_provider,
         azure_subscription=settings.azure_subscription or "",
         azure_settings=settings.azure,
+        gcp=gcp_provider,
+        gcp_project=settings.gcp_project or "",
+        gcp_settings=settings.gcp,
         exec_timeout=settings.k8s.exec_timeout,
         allow_rbac_writes=settings.k8s.allow_rbac_writes,
         cli_allowlist=tuple(settings.cli_allowlist),

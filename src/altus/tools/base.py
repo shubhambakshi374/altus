@@ -53,6 +53,14 @@ class CloudContext:
     """A ``altus.config.models.AzureSettings``. Checked at the gate, for the same
     reason its AWS namesake is: the same azure_write sets a tag and a role
     assignment."""
+    gcp: Any = None
+    """A ``altus.cloud.gcp.GcpProvider``; typed loosely so ``tools.base`` does
+    not import an optional SDK path at module scope."""
+    gcp_project: str = ""
+    gcp_settings: Any = None
+    """A ``altus.config.models.GcpSettings``. Checked at the gate for the same
+    reason the other two are: the same gcp_write sets a label and an IAM
+    policy."""
     exec_timeout: int = 60
     cli_allowlist: tuple[str, ...] = ()
     """Binaries the CLI fallback may run. Registration already filters on this,

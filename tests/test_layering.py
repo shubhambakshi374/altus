@@ -1,9 +1,10 @@
-"""The Phase 2 guard.
+"""The headless guard.
 
-``altus.core``, ``altus.providers``, ``altus.config`` and ``altus.storage`` must stay
-importable without Textual, because the Phase 2 workflow engine drives them
-headlessly. If this test fails, do not delete it — move the offending code
-into ``altus.tui`` instead.
+Every package listed below must stay importable without Textual, because the
+workflow engine drives them with no terminal attached. That was a promise for
+five phases; ``altus.workflow`` is the first thing collecting on it, which is
+exactly why it is on the list. If this test fails, do not delete it --- move
+the offending code into ``altus.tui`` instead.
 """
 
 from __future__ import annotations
@@ -15,7 +16,17 @@ import pytest
 
 import altus
 
-HEADLESS_PACKAGES = ("core", "providers", "config", "storage", "tools", "cloud", "mcp", "render")
+HEADLESS_PACKAGES = (
+    "core",
+    "providers",
+    "config",
+    "storage",
+    "tools",
+    "cloud",
+    "mcp",
+    "render",
+    "workflow",
+)
 SRC = Path(altus.__file__).parent
 
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from altus.tui.commands.registry import Command, CommandRegistry, CommandResult
 
@@ -253,20 +253,37 @@ def _resolve_file(raw: str) -> str | None:
 
 
 async def cmd_tools(app: AltusApp, args: list[str]) -> CommandResult:
+    """What is registered, and what each one costs to call.
+
+    The access column comes from ``sensitivity_of`` rather than being derived
+    here, because ``/workflow`` asks the same question and two doors deciding
+    separately is how one question gets two answers. It also fixes what the
+    local version got wrong: it ran every tool's verb through the *Kubernetes*
+    classifier, and Azure's ``write`` and ``action`` are verbs Kubernetes has
+    never heard of, so they hit the unknown-verb fallback and every Azure
+    mutation was reported as privileged.
+    """
     from altus.cloud.base import INTEGRATIONS
-    from altus.cloud.kube import classify
+    from altus.tools.base import dispatches, sensitivity_of
 
     rows = [f"Workspace: {app.workspace.root}", "", "Tools:"]
+    varies = False
     for tool in sorted(app.registry, key=lambda t: t.name):
-        if tool.read_only:
+        level = sensitivity_of(tool)
+        if not level.needs_approval:
             access = "read-only"
-        elif classify(
-            getattr(tool, "verb", "update"), "", getattr(tool, "subresource", "")
-        ).needs_challenge:
+        elif level.needs_challenge:
             access = "type to confirm"
         else:
             access = "needs approval"
-        rows.append(f"  {tool.name:<18} [{access:^15}]")
+        mark = " *" if dispatches(tool) else ""
+        varies = varies or bool(mark)
+        rows.append(f"  {tool.name:<18} [{access:^15}]{mark}")
+    if varies:
+        rows.append(
+            "\n  * one tool over a whole surface — the arguments decide, so the "
+            "column above is a floor and the real level is settled at the gate"
+        )
 
     from altus.tools.k8s import disabled_classes
 
@@ -535,6 +552,203 @@ async def cmd_gcp(app: AltusApp, args: list[str]) -> CommandResult:
     return CommandResult("\n".join(rows), title="GCP")
 
 
+async def cmd_workflow(app: AltusApp, args: list[str]) -> CommandResult:
+    """Compose a workflow: several steps, in an order, with one blast radius.
+
+    Bare ``/workflow`` opens the designer, because a session registers more
+    tools than anyone holds in their head and a designer that makes you type
+    the name from memory is a text editor with extra steps.
+
+    Nothing here runs a step. There is no engine yet, and this command says so
+    in those words rather than implying one.
+    """
+    from altus.tui.screens.workflow import open_designer
+
+    settings = app.config.workflow
+    if not settings.enabled:
+        return CommandResult.warn("Workflows are disabled ([workflow] enabled = false).")
+
+    verb = args[0] if args else ""
+    rest = args[1:]
+
+    if verb == "new":
+        return await _draft_workflow(app, " ".join(rest))
+    if verb in {"list", "ls"}:
+        return _list_workflows(app)
+    if verb in {"show", "validate", "path", "run"}:
+        if not rest:
+            return CommandResult.error(f"usage: /workflow {verb} <name>")
+        return _one_workflow(app, verb, rest[0])
+
+    open_designer(app, verb, settings)
+    return CommandResult.silent()
+
+
+def _load(app: AltusApp, name: str) -> Any:
+    from altus.workflow import load
+
+    return load(name, app.config.workflow)
+
+
+def _list_workflows(app: AltusApp) -> CommandResult:
+    from altus.core.errors import ConfigError
+    from altus.workflow import blast_radius, check, fatal, list_workflows, workflows_dir
+
+    names = list_workflows(app.config.workflow)
+    if not names:
+        return CommandResult(
+            f"No workflows yet in {workflows_dir(app.config.workflow)}.\n"
+            "  /workflow to design one · /workflow new <what it should do> to describe one",
+            title="Workflows",
+        )
+    rows = ["Workflows:"]
+    for name in names:
+        try:
+            workflow = _load(app, name)
+        except ConfigError as exc:
+            rows.append(f"  {name:<20} unreadable — {exc}")
+            continue
+        radius = blast_radius(workflow, app.registry)
+        count = len(workflow.steps)
+        steps = "1 step" if count == 1 else f"{count} steps"
+        # A workflow that cannot run showing a calm "read" here would be the
+        # list quietly disagreeing with /workflow validate.
+        broken = " ✗ will not run" if fatal(check(workflow, app.registry)) else ""
+        rows.append(f"  {name:<20} {steps:<10} {radius.render()}{broken}")
+    rows.append("\n  /workflow <name> to open one · /workflow show <name> to print it")
+    return CommandResult("\n".join(rows), title="Workflows")
+
+
+def _one_workflow(app: AltusApp, verb: str, name: str) -> CommandResult:
+    """show, validate, path and run --- all four over one loaded workflow."""
+    from altus.core.errors import ConfigError
+    from altus.workflow import blast_radius, check, describe, fatal, path_for, step_level
+
+    if verb == "path":
+        try:
+            return CommandResult(str(path_for(name, app.config.workflow)))
+        except ConfigError as exc:
+            return CommandResult.error(str(exc))
+
+    try:
+        workflow = _load(app, name)
+    except ConfigError as exc:
+        return CommandResult.error(str(exc))
+
+    problems = check(workflow, app.registry)
+    radius = blast_radius(workflow, app.registry)
+
+    if verb == "show":
+        rows = [f"{workflow.name}{'  —  ' + workflow.description if workflow.description else ''}"]
+        for index, step in enumerate(workflow.steps, 1):
+            level, caveat = step_level(step, app.registry)
+            shown = "?" if caveat == "unknown" else level.value
+            after = f"  after {', '.join(step.needs)}" if step.needs else ""
+            rows.append(
+                (
+                    f"  {index:>2}  {step.id:<16} {step.kind:<9} "
+                    f"{describe(step):<40} {shown:<12}{after}"
+                ).rstrip()
+            )
+        rows += ["", radius.render(), *(f"  {note}" for note in radius.notes())]
+        if problems:
+            rows += ["", "Problems:", *(problem.render() for problem in problems)]
+        rows.append("\n  /workflow validate " + name + " · /workflow path " + name)
+        return CommandResult("\n".join(rows), title=workflow.name)
+
+    if verb == "validate":
+        if not problems:
+            return CommandResult(
+                f"{name} is runnable: {len(workflow.steps)} steps, {radius.render()}."
+                + ("" if radius.certain else "\n  " + "\n  ".join(radius.notes())),
+                title=name,
+            )
+        body = "\n".join(problem.render() for problem in problems)
+        blocked = bool(fatal(problems))
+        head = f"{name} cannot run as written:" if blocked else f"{name} will run, with warnings:"
+        return CommandResult(
+            f"{head}\n{body}", severity="error" if blocked else "warning", title=name
+        )
+
+    # run --- the honest version of a feature that does not exist yet.
+    stoppers = fatal(problems)
+    lines = [
+        f"{name}: {len(workflow.steps)} steps, {radius.render()}.",
+        *(f"  {note}" for note in radius.notes()),
+    ]
+    if stoppers:
+        lines += ["", "It cannot run as written:", *(p.render() for p in stoppers)]
+    else:
+        lines.append("  validation passes: every step resolves against this session.")
+    lines += [
+        "",
+        "There is no engine yet, so nothing was run. Running a workflow needs "
+        "decisions this increment did not make: how one step's output reaches "
+        "the next, what happens when step 3 of 6 fails, and how a run is "
+        "recorded so it can be audited afterwards.",
+    ]
+    return CommandResult("\n".join(lines), severity="warning", title=name)
+
+
+async def _draft_workflow(app: AltusApp, wanted: str) -> CommandResult:
+    """Hand the conversation to the model, with the one tool that can save.
+
+    ``workflow_save`` is registered here rather than in ``default_registry``
+    because a tool that writes executable workflow files has no business
+    sitting in the list for every unrelated turn. It takes itself back out
+    once a workflow is saved.
+    """
+    from altus.tools.workflow import WorkflowSaveTool
+
+    settings = app.config.workflow
+    if not settings.allow_model_authoring:
+        return CommandResult.error(
+            "[workflow] allow_model_authoring is false, so workflows are written "
+            "by hand here. Open the designer with /workflow."
+        )
+    if not app.session.tools_enabled or not app.session.model_supports_tools:
+        return CommandResult.error(
+            "Drafting needs tool calling, which this session does not have. "
+            "Open the designer with /workflow instead."
+        )
+
+    app.registry.add(WorkflowSaveTool())
+    if not await app.ask_from_command(_brief(app, wanted)):
+        app.registry.remove("workflow_save")
+        return CommandResult.error("there is no conversation to hand this to")
+    return CommandResult.silent()
+
+
+def _brief(app: AltusApp, wanted: str) -> str:
+    """What the model is being asked to do, in the user's own voice.
+
+    It goes in as a user message rather than a system prompt because it *is*
+    one turn's request, not a standing instruction --- and because the user can
+    then see, scroll back to, and argue with the thing the model was told.
+    """
+    asked = wanted.strip()
+    opening = (
+        f"I want to build a workflow: {asked}"
+        if asked
+        else "I want to build a workflow. Ask me what it should do."
+    )
+    return (
+        f"{opening}\n\n"
+        "A workflow is an ordered set of steps I can run later. Three kinds:\n"
+        "- tool: calls one registered tool with arguments\n"
+        "- agent: gives you a prompt, and optionally a narrowed list of tools\n"
+        "- approval: stops so a human decides whether the rest runs\n\n"
+        "Steps depend on each other through `needs`, not through their order.\n"
+        "Name the tools on every agent step you can: an agent step with no "
+        "tools listed may use any of them, which makes it as dangerous as the "
+        "worst tool I have.\n\n"
+        "Ask me whatever you need, propose the steps in prose first, and call "
+        "workflow_save once I have agreed to them. I will be asked to approve "
+        "the file before it is written. Saving does not run anything.\n\n"
+        f"Tools available: {', '.join(app.registry.names)}."
+    )
+
+
 async def cmd_graphics(app: AltusApp, args: list[str]) -> CommandResult:
     """What is being drawn and why --- the answer to "where are my pictures"."""
     from altus.render.capability import Support, available, detect, explain, images_installed
@@ -625,6 +839,13 @@ def build_registry() -> CommandRegistry:
             "Several read-only views on one screen",
             "dashboard [aws | azure | gcp | k8s] [<scope>]",
             cmd_dashboard,
+        ),
+        Command(
+            "workflow",
+            "Design a multi-step workflow",
+            "workflow [<name> | new <…> | list | show <name> | validate <name> | run <name>]",
+            cmd_workflow,
+            aliases=("workflows",),
         ),
         Command(
             "graphics",

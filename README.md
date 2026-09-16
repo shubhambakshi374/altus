@@ -184,6 +184,9 @@ for the command you are writing.
 | `/azure` · `/azure sub <id>` | Azure tenant, subscription and identity |
 | `/gcp` · `/gcp project <id>` | GCP account, project and identity |
 | `/mcp` · `/mcp check` | MCP servers, what each covers, and drift against the manifest |
+| `/workflow` · `/workflow <name>` | Open the workflow designer |
+| `/workflow new <what it should do>` | Describe one; the model drafts it, you approve the file |
+| `/workflow list` · `show` · `validate` · `path` · `run <name>` | The same workflows from the keyboard |
 | `/dashboard [aws \| azure \| gcp \| k8s] [<scope>]` | Several read-only views on one screen |
 | `/graphics [auto \| image \| cells \| off]` | How visuals are drawn, and why |
 | `/tools` | Tools, installed integrations, standing approvals |
@@ -461,6 +464,108 @@ Only these seven. Pointing Altus at an arbitrary MCP server would mean tools
 with no manifest, every one of them failing closed to a typed challenge — which
 is how a challenge stops being read.
 
+## Workflows
+
+A workflow is several steps, in an order, with one blast radius --- the
+composable half of the software factory. `/workflow` opens the designer;
+`/workflow new "deploy the API to staging"` describes one in words and lets the
+model draft it.
+
+**Nothing runs one yet.** The engine is the next increment, and `/workflow run`
+says exactly that rather than implying otherwise.
+
+Three kinds of step, because three is what Altus can do today:
+
+| | |
+|---|---|
+| `tool` | Calls one registered tool with arguments |
+| `agent` | Gives the model a prompt, and optionally a narrowed tool set |
+| `approval` | Stops, so a human decides whether the rest runs |
+
+Steps depend on each other through `needs`, not through their order in the
+file, because the engine will want a DAG and retrofitting dependency edges
+later would mean rewriting every workflow anyone had written.
+
+```toml
+name = "deploy-api"
+description = "ship the API to staging"
+
+[[steps]]
+id = "inventory"
+kind = "tool"
+tool = "k8s_topology"
+args = { namespace = "staging" }
+
+[[steps]]
+id = "plan"
+kind = "agent"
+needs = ["inventory"]
+prompt = "which deployments changed since the last release?"
+tools = ["k8s_get", "k8s_events"]
+
+[[steps]]
+id = "approve"
+kind = "approval"
+needs = ["plan"]
+message = "ship to staging?"
+```
+
+One file each, under `<config>/workflows`, meant to be diffed and committed
+next to the code it operates on.
+
+### The blast radius is a floor, and says when it is one
+
+A workflow's level is the strictest of its steps. This is the first place in
+Altus that rule applies to an action **nobody has taken yet**, so three things
+stop a printed level buying false confidence:
+
+- `aws_write` reaches 19,189 operations and the same `k8s_apply` writes a
+  ConfigMap and a ClusterRoleBinding --- for those the arguments decide, and
+  anything computed now is a floor;
+- an `agent` step with no `tools` listed may reach any tool in the session, so
+  it is by construction as dangerous as the worst one. Naming tools narrows it,
+  and the designer says so until you do;
+- a step naming a tool this machine lacks has no level at all, and is reported
+  separately rather than failing closed to privileged --- crying wolf over a
+  typo is how a warning stops being read.
+
+Any of those and the radius renders `(at least)`, with the step ids behind it.
+
+```
+deploy-api  —  ship the API to staging
+   1  inventory        tool      k8s_topology                             read
+   2  plan             agent     which deployments changed since the las… read          after inventory
+   3  approve          approval  ship to staging?                         read          after plan
+   4  apply            tool      k8s_apply                                mutate        after approve
+
+blast radius: mutate (at least)
+  steps plan, apply dispatch — what they actually do is decided by their
+  arguments, so this could be stricter when they run
+```
+
+### Letting the model write one
+
+`workflow_save` is the only tool in Altus that writes outside the workspace,
+and the only one whose *contents* are the dangerous part. So the approval
+prompt carries the whole rendered file, and the request takes the workflow's
+own rolled-up level as its sensitivity: a drafted workflow containing a
+privileged step demands the typed challenge, exactly as calling that step
+directly would. Otherwise the file would be a route around the gate --- queue
+the privileged call today, approve a harmless-looking save, run it later.
+
+It is registered only while you are drafting, and takes itself back out once a
+workflow is saved.
+
+```toml
+[workflow]
+enabled               = true
+dir                   = ""     # empty = <config>/workflows
+allow_model_authoring = true   # false: workflows come only from humans
+```
+
+An unrunnable draft is refused rather than saved with warnings, and you are
+not asked about it --- the model can fix a dangling `needs` without you.
+
 ## Kubernetes
 
 Read-only in this release. Ask a question, get a chart:
@@ -722,18 +827,22 @@ altus/providers   one adapter per provider, all folding onto that union
 altus/config      configuration and credential resolution
 altus/storage     JSONL session persistence
 altus/workspace   the rooted filesystem context, and its containment rules
-altus/tools       read-only filesystem tools
+altus/tools       the tools, one package per surface
+altus/cloud       Kubernetes, AWS, Azure and GCP: auth, classifiers, targets
+altus/mcp         the seven shipped MCP servers and their manifests
+altus/workflow    what a workflow is, where it lives, and its blast radius
+altus/render      visuals, independent of the terminal drawing them
 altus/runner      one inference call
 altus/agent       the loop: inference, tool execution, repeat
 altus/tui         the Textual front end
 ```
 
-**`altus.core`, `altus.providers`, `altus.workspace`, `altus.tools` and `altus.agent`
-must never import `textual`.** The Phase 2
-workflow engine drives providers headlessly; if the provider layer were
-entangled with the UI, Phase 2 would start with a rewrite. `tests/test_layering.py`
-enforces this — if it fails, move the offending code into `altus.tui` rather than
-deleting the test.
+**Everything above `altus/tui` must stay importable without `textual`.** That
+was a promise for five phases and `altus.workflow` is the first thing to
+collect on it: a workflow is edited in a screen but defined, validated and
+weighed with no terminal attached, which is what lets the engine drive it
+headlessly. `tests/test_layering.py` enforces the rule — if it fails, move the
+offending code into `altus.tui` rather than deleting the test.
 
 Every adapter normalizes its provider's stream onto one event union
 (`altus/core/events.py`), which already defines tool-call and reasoning events
@@ -833,7 +942,8 @@ tests/         mirrors it; tests/__snapshots__ holds the TUI SVGs
 - **Phase 2d — Azure.** ✅ Resource Graph inventory and topology, cost, quotas, and changes behind a gate that runs a real What-If diff where one exists.
 - **Phase 2e — Google Cloud.** ✅ Asset-inventory search, VPC topology, quotas, and changes behind a gate that is honest about having almost nothing to preview.
 - **Phase 2f — MCP.** ✅ Seven vendor servers kitted out, classified against a curated manifest that fails closed, with a gate honest about having no preview at all.
-- **Phase 3 — the workflow designer.** Compose and run multi-step workflows over a shared workspace; the reason the layering above is enforced.
+- **Phase 3a — the workflow designer.** ✅ Compose multi-step workflows in a screen, in conversation or in a file, each with one honest blast radius. Headless, which is the promise the layering guard has been keeping since Phase 1.
+- **Phase 3b — the engine.** Run them: how a step's output reaches the next, what happens when step 3 of 6 fails, and how a run is recorded so it can be audited.
 - **Phase 3+ —** shell execution, then the software factory built on the workflow engine.
 
 ## License

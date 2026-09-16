@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any, ClassVar
 
 from altus.cloud import k8s as k8s_api
-from altus.cloud.base import ProtectionMode
+from altus.cloud.base import ProtectionMode, Sensitivity
 from altus.cloud.redact import redact
 from altus.tools.approval import ApprovalRequest, Decision
 from altus.tools.base import BaseTool, ToolContext, ToolOutcome
@@ -73,6 +73,16 @@ class K8sMutatingTool(K8sTool):
     """The subresource this tool always acts on --- ``exec``, ``portforward``.
     Classification reads it, so leaving it unset silently downgrades a tool to
     whatever its verb alone implies."""
+    dispatches: ClassVar[bool] = True
+    """The kind comes from the arguments, and the kind is half the answer:
+    ``classify`` in ``confirm`` below reads it, so the same ``k8s_apply``
+    writes a ConfigMap and a ClusterRoleBinding."""
+
+    @classmethod
+    def static_sensitivity(cls) -> Sensitivity:
+        from altus.cloud.kube import classify
+
+        return classify(cls.verb, "", cls.subresource)
 
     async def confirm(
         self,

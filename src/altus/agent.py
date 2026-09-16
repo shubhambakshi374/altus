@@ -293,7 +293,11 @@ def build_workspace(
 
 
 def build_tool_context(
-    config: Config, workspace: Workspace, *, approvals: ApprovalPolicy | None = None
+    config: Config,
+    workspace: Workspace,
+    *,
+    approvals: ApprovalPolicy | None = None,
+    registry: ToolRegistry | None = None,
 ) -> ToolContext:
     """Defaults to DenyAll, so a caller that forgets a policy cannot write."""
     return ToolContext(
@@ -301,6 +305,8 @@ def build_tool_context(
         approvals=approvals or DenyAll(),
         cloud=build_cloud_context(config),
         max_file_bytes=config.tools.max_file_bytes,
+        workflow_settings=config.workflow,
+        registry=registry,
     )
 
 

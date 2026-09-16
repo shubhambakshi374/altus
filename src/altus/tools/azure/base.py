@@ -67,6 +67,7 @@ class AzureMutatingTool(AzureTool):
 
     read_only: ClassVar[bool] = False
     action: ClassVar[str] = "call"
+    dispatches: ClassVar[bool] = True
 
     async def check_lock(self, provider: Any, scope: str) -> tuple[bool, str]:
         """Locks that apply at or above this scope.

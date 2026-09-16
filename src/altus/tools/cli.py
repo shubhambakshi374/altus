@@ -93,6 +93,7 @@ class CliTool(BaseTool):
 
     binary: ClassVar[str] = ""
     read_only: ClassVar[bool] = False
+    dispatches: ClassVar[bool] = True
     input_schema: ClassVar[dict[str, Any]] = {
         "type": "object",
         "properties": {

@@ -74,6 +74,7 @@ class GcpMutatingTool(GcpTool):
 
     read_only: ClassVar[bool] = False
     action: ClassVar[str] = "call"
+    dispatches: ClassVar[bool] = True
 
     async def check_protection(
         self, provider: Any, method_id: str, params: dict[str, Any]

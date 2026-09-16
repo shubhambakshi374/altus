@@ -13,6 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Protocol, runtime_checkable
 
+from altus.cloud.base import Sensitivity
 from altus.core.visuals import Visual
 from altus.tools.approval import ApprovalPolicy, DenyAll
 from altus.workspace import Workspace
@@ -108,6 +109,14 @@ class ToolContext:
     workspace: Workspace
     approvals: ApprovalPolicy = field(default_factory=DenyAll)
     cloud: CloudContext = field(default_factory=lambda: CloudContext())
+    workflow_settings: Any = None
+    """An ``altus.config.models.WorkflowSettings``. Not under ``cloud``: a
+    workflow is not a cloud, and MCP's settings only live there because they
+    were put there before that distinction was worth making."""
+    registry: Any = None
+    """The session's ``ToolRegistry``, for the one tool that has to reason
+    about the others. Typed loosely because ``tools.registry`` imports this
+    module. None means a caller that never needed it."""
     max_file_bytes: int = DEFAULT_MAX_FILE_BYTES
     max_lines: int = DEFAULT_MAX_LINES
     max_entries: int = DEFAULT_MAX_ENTRIES
@@ -161,9 +170,59 @@ class BaseTool(ABC):
     read_only: ClassVar[bool] = True
     input_schema: ClassVar[dict[str, Any]] = {}
 
+    dispatches: ClassVar[bool] = False
+    """True when the real sensitivity depends on the call's arguments.
+
+    ``aws_write`` is one tool that reaches 19,189 operations; ``k8s_apply``
+    writes a ConfigMap and a ClusterRoleBinding. For those, anything decided
+    before the arguments exist is a floor and not an answer, and a caller
+    reasoning about a call that has not been made yet has to be told so.
+    """
+
     @abstractmethod
     async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolOutcome:
         """Do the work. Return an error outcome rather than raising."""
+
+    @classmethod
+    def static_sensitivity(cls) -> Sensitivity:
+        """The strictest level knowable without the arguments.
+
+        Each surface overrides this where it knows better --- the Kubernetes
+        tools run their own verb and subresource through the Kubernetes
+        classifier --- because a verb means different things on different
+        surfaces. Azure also calls its verbs ``write`` and ``action``, and
+        putting those through the Kubernetes classifier is how ``/tools``
+        came to report every Azure mutation as privileged.
+        """
+        return Sensitivity.READ if cls.read_only else Sensitivity.MUTATE
+
+
+def sensitivity_of(tool: Any) -> Sensitivity:
+    """How dangerous a tool is, before anyone has chosen its arguments.
+
+    One function because there are two doors onto it --- ``/tools`` and the
+    workflow designer --- and two doors deciding separately is how the same
+    question gets two answers.
+    """
+    found = getattr(type(tool), "static_sensitivity", None)
+    if found is None:
+        # A Tool satisfying the Protocol without subclassing BaseTool. The
+        # read/write flag is all such a tool promises, so it is all we use.
+        return Sensitivity.READ if getattr(tool, "read_only", True) else Sensitivity.MUTATE
+    return Sensitivity(found())
+
+
+def dispatches(tool: Any) -> bool:
+    """Whether the arguments could still make this stricter than it looks.
+
+    ``PRIVILEGED`` is the top of the scale, so a tool already there has
+    nothing left to escalate to and is never reported as unresolved --- which
+    is what keeps ``k8s_exec`` out of the list even though it shares a base
+    class with ``k8s_apply``.
+    """
+    if not getattr(type(tool), "dispatches", False):
+        return False
+    return sensitivity_of(tool) is not Sensitivity.PRIVILEGED
 
 
 def truncated_note(shown: int, total: int, unit: str) -> str:

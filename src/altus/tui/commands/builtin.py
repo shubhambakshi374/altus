@@ -253,20 +253,37 @@ def _resolve_file(raw: str) -> str | None:
 
 
 async def cmd_tools(app: AltusApp, args: list[str]) -> CommandResult:
+    """What is registered, and what each one costs to call.
+
+    The access column comes from ``sensitivity_of`` rather than being derived
+    here, because ``/workflow`` asks the same question and two doors deciding
+    separately is how one question gets two answers. It also fixes what the
+    local version got wrong: it ran every tool's verb through the *Kubernetes*
+    classifier, and Azure's ``write`` and ``action`` are verbs Kubernetes has
+    never heard of, so they hit the unknown-verb fallback and every Azure
+    mutation was reported as privileged.
+    """
     from altus.cloud.base import INTEGRATIONS
-    from altus.cloud.kube import classify
+    from altus.tools.base import dispatches, sensitivity_of
 
     rows = [f"Workspace: {app.workspace.root}", "", "Tools:"]
+    varies = False
     for tool in sorted(app.registry, key=lambda t: t.name):
-        if tool.read_only:
+        level = sensitivity_of(tool)
+        if not level.needs_approval:
             access = "read-only"
-        elif classify(
-            getattr(tool, "verb", "update"), "", getattr(tool, "subresource", "")
-        ).needs_challenge:
+        elif level.needs_challenge:
             access = "type to confirm"
         else:
             access = "needs approval"
-        rows.append(f"  {tool.name:<18} [{access:^15}]")
+        mark = " *" if dispatches(tool) else ""
+        varies = varies or bool(mark)
+        rows.append(f"  {tool.name:<18} [{access:^15}]{mark}")
+    if varies:
+        rows.append(
+            "\n  * one tool over a whole surface — the arguments decide, so the "
+            "column above is a floor and the real level is settled at the gate"
+        )
 
     from altus.tools.k8s import disabled_classes
 

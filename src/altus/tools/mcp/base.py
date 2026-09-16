@@ -116,6 +116,7 @@ class McpMutatingTool(McpTool):
 
     read_only: ClassVar[bool] = False
     action: ClassVar[str] = "call"
+    dispatches: ClassVar[bool] = True
 
     def writes_allowed(self, ctx: ToolContext) -> str:
         """``[mcp] allow_writes`` cannot work by withholding a tool --- the same

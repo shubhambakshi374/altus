@@ -53,6 +53,7 @@ class AwsMutatingTool(AwsTool):
 
     read_only: ClassVar[bool] = False
     action: ClassVar[str] = "call"
+    dispatches: ClassVar[bool] = True
 
     async def preflight(
         self, provider: Any, service: str, operation: str, params: dict[str, Any], region: str

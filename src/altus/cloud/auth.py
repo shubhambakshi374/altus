@@ -167,6 +167,11 @@ async def verify(cloud: str) -> str:
         finally:
             await provider.close()
         return f"tenant {identity['tenant']} · {identity['principal'] or identity['object_id']}"
+    if cloud == "gcp":
+        from altus.cloud.gcp import GcpProvider
+
+        identity = await GcpProvider().whoami()
+        return f"project {identity['project'] or '(none)'} · {identity['account'] or identity['source']}"
     if cloud == "k8s":
         from altus.cloud.kube import list_contexts
 

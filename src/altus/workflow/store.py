@@ -24,6 +24,23 @@ from altus.workflow.models import Workflow, valid_slug
 
 SUFFIX = ".toml"
 
+#: What a step's keys look like when read top to bottom: what it is, what it
+#: waits for, then how it behaves. Anything unlisted sorts between `args` and
+#: the trailing pair, alphabetically, so a new field cannot silently land in
+#: the middle of the identity block.
+KEY_ORDER = {
+    "id": 0,
+    "kind": 1,
+    "needs": 2,
+    "tool": 10,
+    "args": 11,
+    "prompt": 12,
+    "tools": 13,
+    "message": 14,
+    "wait": 90,
+    "on_error": 91,
+}
+
 
 def workflows_dir(settings: Any = None) -> Path:
     """``[workflow] dir``, or ``<config>/workflows``."""
@@ -59,16 +76,58 @@ def render(workflow: Workflow) -> str:
     payload: dict[str, Any] = {"name": workflow.name}
     if workflow.description:
         payload["description"] = workflow.description
-    steps: list[dict[str, Any]] = []
+    if workflow.inputs:
+        # Before [[steps]]: TOML puts every table after the scalars that follow
+        # it, so an `inputs` table written later would swallow the step array.
+        payload["inputs"] = {
+            name: spec.model_dump(mode="json", exclude_defaults=True)
+            for name, spec in workflow.inputs.items()
+        }
+    out = tomli_w.dumps(payload).rstrip()
     for step in workflow.steps:
         # exclude_defaults keeps an empty `needs` or `args` out of the file, so
         # a hand-written workflow stays as short as the author wrote it.
         rest = step.model_dump(mode="json", exclude_defaults=True)
         rest.pop("id", None)
         rest.pop("kind", None)
-        steps.append({"id": step.id, "kind": step.kind, **rest})
-    payload["steps"] = steps
-    return tomli_w.dumps(payload)
+        out += "\n\n" + _step_toml({"id": step.id, "kind": step.kind, **rest})
+    return out + "\n"
+
+
+def _step_toml(entry: dict[str, Any]) -> str:
+    """One ``[[steps]]`` block, written out rather than left to tomli_w.
+
+    tomli_w decides between a block and a one-line inline table by a heuristic
+    about what the values happen to contain, so the same workflow could render
+    either way depending on whether a step had a `needs` entry. This is the
+    format people read, diff and commit, and it should not shift under them.
+    """
+    lines = ["[[steps]]"]
+    ordered = sorted(entry.items(), key=lambda item: (KEY_ORDER.get(item[0], 50), item[0]))
+    lines += [f"{key} = {_value(value)}" for key, value in ordered]
+    return "\n".join(lines)
+
+
+def _value(value: Any) -> str:
+    """One TOML value, inline. The value space is whatever JSON allows,
+    because that is what a tool's arguments are."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    if isinstance(value, str):
+        return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
+    if isinstance(value, list):
+        return "[" + ", ".join(_value(item) for item in value) + "]"
+    if isinstance(value, dict):
+        inner = ", ".join(f"{key} = {_value(item)}" for key, item in value.items())
+        return "{ " + inner + " }" if inner else "{}"
+    if value is None:
+        # Nothing in a workflow should reach here --- every optional field is
+        # excluded by exclude_defaults --- and TOML has no null, so an empty
+        # string is the only representable thing.
+        return '""'
+    return _value(str(value))
 
 
 def load(name: str, settings: Any = None) -> Workflow:

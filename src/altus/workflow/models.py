@@ -162,12 +162,38 @@ class ApprovalStep(Step):
 AnyStep = Annotated[ToolStep | AgentStep | ApprovalStep, Field(discriminator="kind")]
 
 
+class Input(BaseModel):
+    """One value a workflow is run against.
+
+    Without these a workflow is one file per repository, which is not a
+    workflow. Available to every step as ``${inputs.<name>}`` with no ``needs``
+    entry, because an input is known before the first step rather than
+    produced by one.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    description: str = ""
+    default: str = ""
+    """A literal, or ``@git.origin`` for the checkout's own remote."""
+    required: bool = False
+
+
 class Workflow(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str
     description: str = ""
+    inputs: dict[str, Input] = Field(default_factory=dict)
     steps: list[AnyStep] = Field(default_factory=list)
+
+    @field_validator("inputs")
+    @classmethod
+    def _input_names_are_slugs(cls, value: dict[str, Input]) -> dict[str, Input]:
+        bad = sorted(name for name in value if not valid_slug(name))
+        if bad:
+            raise ValueError(f"input names must be slugs: {', '.join(bad)}")
+        return value
 
     @field_validator("name")
     @classmethod

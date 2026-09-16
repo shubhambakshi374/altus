@@ -20,9 +20,10 @@ from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Vertical, VerticalScroll
 from textual.content import Content
-from textual.screen import Screen
-from textual.widgets import Label, Static
+from textual.screen import ModalScreen, Screen
+from textual.widgets import Input, Label, Static
 
+from altus.core.errors import ConfigError
 from altus.workflow import Workflow, blast_radius, describe, run_workflow
 from altus.workflow.engine import RunRefused
 
@@ -60,10 +61,17 @@ class RunScreen(Screen[None]):
     RunScreen VerticalScroll { height: 1fr; }
     """
 
-    def __init__(self, workflow: Workflow, *, settings: Any = None) -> None:
+    def __init__(
+        self,
+        workflow: Workflow,
+        *,
+        settings: Any = None,
+        given: dict[str, str] | None = None,
+    ) -> None:
         super().__init__()
         self.workflow = workflow
         self.settings = settings
+        self.given = dict(given or {})
         self.run_id = ""
         self.finished = False
 
@@ -123,6 +131,19 @@ class RunScreen(Screen[None]):
             self.finished = True
             return
 
+        # Asked for before the gate, never after: an approval prompt showing
+        # `${inputs.repo}` where the target should be is approving nothing.
+        try:
+            values = await self._inputs()
+        except ConfigError as exc:
+            self._say(str(exc), "step-failed")
+            self.finished = True
+            return
+        if values is None:
+            self._say("cancelled", "step-skipped")
+            self.finished = True
+            return
+
         details = {step.id: describe(step) for step in self.workflow.steps}
         stream = run_workflow(
             self.workflow,
@@ -131,6 +152,7 @@ class RunScreen(Screen[None]):
             provider=getattr(app, "provider", None),
             session=getattr(app, "session", None),
             confirm=self._confirm,
+            inputs=values,
         )
         try:
             # aclosing so a cancelled run is closed here rather than whenever
@@ -145,6 +167,23 @@ class RunScreen(Screen[None]):
             self._say(f"the run could not continue: {exc}", "step-failed")
         finally:
             self.finished = True
+
+    async def _inputs(self) -> dict[str, str] | None:
+        """Resolve the workflow's inputs, asking for whatever is missing."""
+        from altus.workflow import missing_inputs, resolve_inputs
+
+        given = dict(self.given)
+        for name in missing_inputs(self.workflow, given):
+            spec = self.workflow.inputs[name]
+            answer = await self.app.push_screen_wait(
+                AskInput(self.workflow.name, name, spec.description)
+            )
+            if not answer:
+                return None
+            given[name] = answer
+        return resolve_inputs(
+            self.workflow, given, root=getattr(getattr(self.app, "workspace", None), "root", None)
+        )
 
     def _apply(self, event: Any, details: dict[str, str]) -> None:
         match event.type:
@@ -246,3 +285,40 @@ def _plan(workflow: Workflow) -> str:
         f"{index:>2}  {step.id:<16} {step.kind:<9} {describe(step)}"
         for index, step in enumerate(order(workflow), 1)
     )
+
+
+class AskInput(ModalScreen[str | None]):
+    """One missing input. Asked before the run gate, never after."""
+
+    BINDINGS: ClassVar[list[BindingType]] = [Binding("escape", "close", "Cancel")]
+    DEFAULT_CSS = """
+    AskInput { align: center middle; }
+    AskInput > Vertical {
+        width: 74; max-width: 92%; height: auto;
+        border: round $accent; background: $surface; padding: 1 2;
+    }
+    AskInput .title { text-style: bold; padding-bottom: 1; }
+    AskInput .hint { color: $text-muted; padding-top: 1; }
+    """
+
+    def __init__(self, workflow: str, field: str, description: str) -> None:
+        super().__init__()
+        self.workflow = workflow
+        self.field = field
+        self.description = description
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label(Content(f"{self.workflow} needs {self.field}"), classes="title")
+            yield Static(self.description or "no description given", classes="hint", markup=False)
+            yield Input(id="value")
+            yield Label("enter to use it · esc to cancel the run", classes="hint")
+
+    def on_mount(self) -> None:
+        self.query_one("#value", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self.dismiss(event.value.strip() or None)
+
+    def action_close(self) -> None:
+        self.dismiss(None)

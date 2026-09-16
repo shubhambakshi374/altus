@@ -21,7 +21,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
-REF = re.compile(r"\$\{([a-z0-9][a-z0-9_-]*)\}")
+#: A step id, or ``inputs.<name>``. Step ids cannot contain a dot --- the slug
+#: rule forbids it --- so the two forms can never be confused for each other.
+REF = re.compile(r"\$\{([a-z0-9][a-z0-9_-]*(?:\.[a-z0-9][a-z0-9_-]*)?)\}")
 
 MAX_SUBSTITUTED = 20_000
 """A step's output is capped before it is pasted into the next step's
@@ -56,6 +58,11 @@ def substitute(value: Any, outputs: dict[str, str]) -> Any:
     if isinstance(value, list):
         return [substitute(item, outputs) for item in value]
     return value
+
+
+def is_input(name: str) -> bool:
+    """An input reference, available everywhere, rather than a step's output."""
+    return name.startswith("inputs.")
 
 
 def ancestors(step_id: str, needs: dict[str, list[str]]) -> set[str]:

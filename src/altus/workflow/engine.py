@@ -4,6 +4,10 @@ Four decisions were deferred out of the designer increment on purpose, because
 each one is a real choice and none of them is better made under the pressure of
 having already shipped half an executor. All four are settled here.
 
+Inputs are seeded into the same substitution table the steps write to, so
+``${inputs.repo}`` costs no new mechanism: it is an output that happened to be
+known before the run began.
+
 **How a step's output reaches the next.** ``${step}`` substitution, and nothing
 else --- see ``refs.py`` for why an expression language was the wrong trade.
 A step may also *wait*: run again until its output satisfies a condition, which
@@ -133,6 +137,7 @@ async def run_workflow(
     runs_root: Path | None = None,
     sleep: Any = None,
     now: Any = None,
+    inputs: dict[str, str] | None = None,
 ) -> AsyncGenerator[RunEvent]:
     """Execute ``workflow``, yielding one event per thing that happens.
 
@@ -161,6 +166,9 @@ async def run_workflow(
     now = now or time.monotonic
     steps = order(workflow)
     state = RunState(run_id=_new_run_id())
+    # Inputs seed the substitution table, so `${inputs.repo}` needs no new
+    # mechanism --- it is an output that was known before the run started.
+    state.outputs.update(inputs or {})
     began = now()
     recorder = RunRecorder(state.run_id, runs_root) if record else None
 

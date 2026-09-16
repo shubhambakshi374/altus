@@ -737,3 +737,140 @@ async def test_a_failing_step_is_not_retried_by_a_wait(tree: Path) -> None:
     )
     await collect(workflow, registry, context(tree, registry), sleep=sleep, now=now)
     assert tool.calls == 1
+
+
+# ---------------------------------------------------------------- inputs
+
+
+def with_inputs(**over):  # type: ignore[no-untyped-def]
+    from altus.workflow import Input
+
+    return Workflow(
+        name="x",
+        inputs={
+            "repo": Input(description="owner/name", default="acme/api"),
+            "image": Input(description="container image", required=True),
+            **over,
+        },
+        steps=[
+            ToolStep(
+                id="save",
+                tool="write_file",
+                args={"path": "out.md", "content": "${inputs.repo} @ ${inputs.image}"},
+            )
+        ],
+    )
+
+
+async def test_an_input_reaches_every_step_without_a_needs_entry(
+    tree: Path, registry: ToolRegistry
+) -> None:
+    """An input is known before the first step runs rather than produced by
+    one, so demanding a dependency on it would be nonsense."""
+    from altus.workflow import resolve_inputs
+
+    workflow = with_inputs()
+    values = resolve_inputs(workflow, {"image": "acme/api:1.2"})
+    assert not fatal(check(workflow, registry))
+
+    await collect(workflow, registry, context(tree, registry), inputs=values)
+    assert (tree / "out.md").read_text(encoding="utf-8") == "acme/api @ acme/api:1.2"
+
+
+def test_a_missing_required_input_refuses_rather_than_substituting_nothing() -> None:
+    """Approving a run whose targets were still blank would be approving
+    nothing at all."""
+    from altus.core.errors import ConfigError
+    from altus.workflow import missing_inputs, resolve_inputs
+
+    assert missing_inputs(with_inputs(), {}) == ["image"]
+    with pytest.raises(ConfigError, match="needs a value for: image"):
+        resolve_inputs(with_inputs(), {})
+
+
+def test_an_input_nobody_declared_is_refused_not_ignored() -> None:
+    """A misspelt `repo=` that silently does nothing runs the workflow against
+    whatever the default was, which is the worst of the three outcomes."""
+    from altus.core.errors import ConfigError
+    from altus.workflow import resolve_inputs
+
+    with pytest.raises(ConfigError, match="declares no input called 'rep'"):
+        resolve_inputs(with_inputs(), {"rep": "x", "image": "y"})
+
+
+def test_a_reference_to_an_undeclared_input_is_fatal(registry: ToolRegistry) -> None:
+    workflow = Workflow(
+        name="x",
+        steps=[ToolStep(id="a", tool="read_file", args={"path": "${inputs.ghost}"})],
+    )
+    problems = fatal(check(workflow, registry))
+    assert problems and "not an input this workflow declares" in problems[0].message
+
+
+def test_the_current_repo_default_reads_the_checkouts_own_remote(tmp_path: Path) -> None:
+    """`@git.origin` is the "current repo" affordance, and the only dynamic
+    default there is --- each one is something that can resolve differently on
+    two machines, which is what stops a workflow file being portable."""
+    import subprocess
+
+    from altus.workflow.inputs import git_origin
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "git@github.com:acme/api.git"], cwd=root, check=True
+    )
+    assert git_origin(root) == "acme/api"
+
+
+def test_a_checkout_with_no_remote_resolves_to_nothing_rather_than_failing(
+    tmp_path: Path,
+) -> None:
+    """A workflow carrying this default may still be run with an explicit
+    value, and refusing here would make that impossible."""
+    from altus.workflow.inputs import git_origin
+
+    assert git_origin(tmp_path) == ""
+
+
+def test_an_unknown_dynamic_default_is_refused() -> None:
+    from altus.core.errors import ConfigError
+    from altus.workflow import Input, resolve_inputs
+
+    workflow = Workflow(name="x", inputs={"a": Input(default="@whatever.magic")})
+    with pytest.raises(ConfigError, match="not a default Altus knows"):
+        resolve_inputs(workflow, {})
+
+
+def test_inputs_survive_the_file(tmp_path: Path) -> None:
+    from altus.workflow import parse, render
+
+    workflow = with_inputs()
+    assert parse(render(workflow), name="x") == workflow
+
+
+def test_a_step_key_order_does_not_shift_under_the_reader() -> None:
+    """The format people diff and commit. tomli_w decides between a block and
+    a one-line inline table by a heuristic about what the values happen to
+    contain, so the same workflow rendered either way depending on whether a
+    step had a `needs` entry."""
+    from altus.workflow import render
+
+    text = render(
+        Workflow(
+            name="x",
+            steps=[
+                ToolStep(
+                    id="ci",
+                    tool="read_file",
+                    args={"path": "a"},
+                    wait=Wait(until="conclusion"),
+                    on_error="continue",
+                )
+            ],
+        )
+    )
+    body = [line.split(" =")[0] for line in text.splitlines() if " = " in line]
+    assert body == ["name", "id", "kind", "tool", "args", "wait", "on_error"]
+    assert "[[steps]]" in text

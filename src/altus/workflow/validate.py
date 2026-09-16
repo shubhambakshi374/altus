@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from altus.workflow.models import AgentStep, ApprovalStep, ToolStep, Workflow
-from altus.workflow.refs import ancestors, refs_in
+from altus.workflow.refs import ancestors, is_input, refs_in
 
 #: A tool's prefix names the integration that ships it. Used only to tell a
 #: typo from an extra that is not installed.
@@ -192,11 +192,19 @@ def _bad_references(workflow: Workflow) -> list[Problem]:
     """
     needs = {step.id: list(step.needs) for step in workflow.steps}
     ids = set(needs)
+    inputs = set(getattr(workflow, "inputs", {}) or {})
     found: list[Problem] = []
     for step in workflow.steps:
         available = ancestors(step.id, needs)
         for name in sorted(_referenced(step)):
-            if name == step.id:
+            if is_input(name):
+                # An input needs no `needs`: it is known before the first step
+                # runs rather than produced by one. It does have to exist.
+                if name.removeprefix("inputs.") not in inputs:
+                    found.append(
+                        Problem(f"${{{name}}} is not an input this workflow declares", step.id)
+                    )
+            elif name == step.id:
                 found.append(Problem(f"${{{name}}} refers to this step's own output", step.id))
             elif name not in ids:
                 found.append(Problem(f"${{{name}}} names a step that does not exist", step.id))

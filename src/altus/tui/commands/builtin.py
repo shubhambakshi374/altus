@@ -511,7 +511,18 @@ async def cmd_mcp(app: AltusApp, args: list[str]) -> CommandResult:
     return CommandResult("\n".join(rows))
 
 
-def _start_run(app: AltusApp, name: str) -> CommandResult:
+def _pairs(args: list[str]) -> dict[str, str]:
+    """``repo=acme/api image=acme/api:1.2``.
+
+    Anything without an ``=`` is dropped here and reported by the resolver,
+    which knows what the workflow actually declares --- a silently ignored
+    argument would run the workflow against its default and look like it
+    worked.
+    """
+    return dict(part.split("=", 1) for part in args if "=" in part)
+
+
+def _start_run(app: AltusApp, name: str, given: dict[str, str]) -> CommandResult:
     """Open the run screen. Everything it needs to refuse is checked there."""
     from altus.core.errors import ConfigError
     from altus.tui.screens.run import RunScreen
@@ -520,7 +531,7 @@ def _start_run(app: AltusApp, name: str) -> CommandResult:
         workflow = _load(app, name)
     except ConfigError as exc:
         return CommandResult.error(str(exc))
-    app.push_screen(RunScreen(workflow, settings=app.config.workflow))
+    app.push_screen(RunScreen(workflow, settings=app.config.workflow, given=given))
     return CommandResult.silent()
 
 
@@ -639,8 +650,8 @@ async def cmd_workflow(app: AltusApp, args: list[str]) -> CommandResult:
         return _past_runs(app, rest[0] if rest else "")
     if verb == "run":
         if not rest:
-            return CommandResult.error("usage: /workflow run <name>")
-        return _start_run(app, rest[0])
+            return CommandResult.error("usage: /workflow run <name> [name=value ...]")
+        return _start_run(app, rest[0], _pairs(rest[1:]))
     if verb in {"show", "validate", "path"}:
         if not rest:
             return CommandResult.error(f"usage: /workflow {verb} <name>")
@@ -716,6 +727,14 @@ def _one_workflow(app: AltusApp, verb: str, name: str) -> CommandResult:
                     f"{describe(step):<40} {shown:<12}{after}"
                 ).rstrip()
             )
+        if workflow.inputs:
+            rows.append("")
+            rows.append("Takes:")
+            for key, spec in workflow.inputs.items():
+                shown = spec.description or "(no description)"
+                extra = f"  default {spec.default}" if spec.default else ""
+                need = "  required" if spec.required and not spec.default else ""
+                rows.append(f"  {key:<16} {shown}{extra}{need}")
         rows += ["", radius.render(), *(f"  {note}" for note in radius.notes())]
         if problems:
             rows += ["", "Problems:", *(problem.render() for problem in problems)]
@@ -888,7 +907,7 @@ def build_registry() -> CommandRegistry:
         Command(
             "workflow",
             "Design a multi-step workflow",
-            "workflow [<name> | new <…> | list | show | validate | run | runs]",
+            "workflow [<name> | new <…> | list | show | validate | run <n> [k=v] | runs]",
             cmd_workflow,
             aliases=("workflows",),
         ),

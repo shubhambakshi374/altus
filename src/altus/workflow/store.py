@@ -97,6 +97,19 @@ def render(workflow: Workflow) -> str:
     return out + "\n"
 
 
+def fingerprint(workflow: Workflow) -> str:
+    """A short hash of the workflow as written.
+
+    Recorded when a run starts so a parked run can only be resumed against the
+    file it was planned from. Taken over ``render`` rather than over the file's
+    bytes so a comment or a reordered key does not invalidate a run, while any
+    change to what would actually happen does.
+    """
+    import hashlib
+
+    return hashlib.sha256(render(workflow).encode("utf-8")).hexdigest()[:16]
+
+
 def _step_toml(entry: dict[str, Any]) -> str:
     """One ``[[steps]]`` block, written out rather than left to tomli_w.
 

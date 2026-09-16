@@ -53,14 +53,17 @@ from typing import Any
 from altus.cloud.base import Sensitivity
 from altus.core.session import Session
 from altus.core.types import Role
+from altus.tools.approval import Parked
 from altus.tools.base import ToolContext
 from altus.tools.registry import ToolRegistry
 from altus.workflow.blast import blast_radius
 from altus.workflow.events import (
     RunEvent,
     RunFinished,
+    RunResumed,
     RunStarted,
     StepFinished,
+    StepParked,
     StepSkipped,
     StepStarted,
     StepWaiting,
@@ -68,6 +71,7 @@ from altus.workflow.events import (
 from altus.workflow.models import AgentStep, AnyStep, ApprovalStep, ToolStep, Workflow
 from altus.workflow.refs import substitute
 from altus.workflow.runs import RunRecorder
+from altus.workflow.store import fingerprint
 from altus.workflow.validate import check
 from altus.workflow.validate import fatal as fatal_problems
 
@@ -85,6 +89,20 @@ class RunRefused(Exception):
     """The workflow was not started. Carries the reason, already phrased."""
 
 
+@dataclass(frozen=True)
+class Resume:
+    """Everything a parked run needs to be picked up where it stopped."""
+
+    run_id: str
+    outputs: dict[str, str]
+    """What the earlier steps produced, replayed from the record."""
+    completed: set[str]
+    """Steps that already finished. They are not run again --- a resume that
+    re-ran a commit would be the safety mechanism causing the damage."""
+    at: str = ""
+    """The step it parked on."""
+
+
 @dataclass
 class RunState:
     """What has happened so far. The engine's only memory."""
@@ -97,6 +115,9 @@ class RunState:
     done: set[str] = field(default_factory=set)
     """Steps that produced a result, whatever that result was. Distinct from
     ``ran`` because the skip loop needs names, not a count."""
+    parked_at: str = ""
+    """The step that reached a gate with nobody there to answer. It produced no
+    output and is the first thing a resume runs again."""
     stopped_at: str = ""
     """The step whose failure ended the run, set by whichever failing step got
     there first. Also the signal to every step in the same wave that has not
@@ -164,6 +185,7 @@ async def run_workflow(
     sleep: Any = None,
     now: Any = None,
     inputs: dict[str, str] | None = None,
+    resume: Resume | None = None,
 ) -> AsyncGenerator[RunEvent]:
     """Execute ``workflow``, yielding one event per thing that happens.
 
@@ -192,21 +214,46 @@ async def run_workflow(
     now = now or time.monotonic
     frontiers = waves(workflow)
     steps = [step for wave in frontiers for step in wave]
-    state = RunState(run_id=_new_run_id())
+    state = RunState(run_id=resume.run_id if resume is not None else _new_run_id())
     # Inputs seed the substitution table, so `${inputs.repo}` needs no new
     # mechanism --- it is an output that was known before the run started.
     state.outputs.update(inputs or {})
+    if resume is not None:
+        # A resumed run inherits what the first leg produced and does not run
+        # any of it again: re-running a commit to get back to where the run
+        # stopped would be the safety mechanism causing the damage.
+        state.outputs.update(resume.outputs)
+        state.done |= resume.completed
     began = now()
+    # The same record, appended to. What happened is one run with a gap in the
+    # middle where it waited for a person; two files would make it two
+    # half-runs, neither of which reads like the thing that was done.
     recorder = RunRecorder(state.run_id, runs_root) if record else None
 
-    started = RunStarted(
-        run_id=state.run_id,
-        workflow=workflow.name,
-        started=datetime.now(UTC).isoformat(timespec="seconds"),
-        steps=[step.id for step in steps],
-        blast=blast_radius(workflow, registry).level,
-        parallel=workflow.parallel,
-    )
+    when = datetime.now(UTC).isoformat(timespec="seconds")
+    blast = blast_radius(workflow, registry).level
+    started: Any
+    if resume is None:
+        started = RunStarted(
+            run_id=state.run_id,
+            workflow=workflow.name,
+            started=when,
+            steps=[step.id for step in steps],
+            blast=blast,
+            parallel=workflow.parallel,
+            fingerprint=fingerprint(workflow),
+            inputs=dict(inputs or {}),
+        )
+    else:
+        started = RunResumed(
+            run_id=state.run_id,
+            workflow=workflow.name,
+            started=when,
+            steps=[step.id for step in steps if step.id not in state.done],
+            blast=blast,
+            parallel=workflow.parallel,
+            at=resume.at,
+        )
 
     if confirm is not None and not await confirm(started, workflow):
         raise RunRefused(f"{workflow.name} was not started.")
@@ -249,9 +296,31 @@ async def run_workflow(
             attempts = 0
             while True:
                 attempts += 1
-                ok, summary, output, denied = await _run_step(
-                    step, args, registry, ctx, provider=provider, session=session
-                )
+                try:
+                    ok, summary, output, denied = await _run_step(
+                        step, args, registry, ctx, provider=provider, session=session
+                    )
+                except Parked as parked:
+                    # Nobody was there to answer. The step produced nothing and
+                    # is not marked done, so a resume runs it again from the
+                    # start --- with a person at the gate this time.
+                    emit(
+                        StepParked(
+                            step=step.id,
+                            tool=parked.request.tool,
+                            action=parked.request.action,
+                            path=parked.request.path,
+                            target=parked.request.target,
+                            sensitivity=parked.request.sensitivity,
+                            detail=parked.request.summary,
+                        )
+                    )
+                    if not state.parked_at:
+                        state.parked_at = step.id
+                    if not state.stopping:
+                        state.stopped_at = step.id
+                        state.stopped_by = (f"needs approval to {parked.request.action}", False)
+                    return
                 if step.wait is None or not ok or step.wait.satisfied(output):
                     break
                 elapsed = now() - clock
@@ -298,6 +367,8 @@ async def run_workflow(
         for number, wave in enumerate(frontiers, 1):
             pending: list[AnyStep] = []
             for step in wave:
+                if step.id in state.done:
+                    continue  # already run, in the leg this one is resuming
                 blocker = state.blocked_by(step)
                 if blocker:
                     state.skipped.add(step.id)
@@ -345,6 +416,8 @@ async def run_workflow(
         if state.stopping:
             summary, denied = state.stopped_by
             state_name = "denied" if denied else "failed"
+            if state.parked_at:
+                state_name = "parked"
             detail = f"{state.stopped_at}: {summary}"
             # Everything a stopping failure prevented is skipped *by name*.
             # Letting the loop simply end would leave those steps in the record
@@ -353,10 +426,12 @@ async def run_workflow(
             for later in steps:
                 if later.id in state.done or later.id in state.skipped:
                     continue
+                if later.id == state.parked_at:
+                    # Already accounted for by its own event, and calling it
+                    # skipped would be the record saying it will not happen.
+                    continue
                 state.skipped.add(later.id)
-                halted = StepSkipped(
-                    step=later.id, reason=f"the run stopped at {state.stopped_at}"
-                )
+                halted = StepSkipped(step=later.id, reason=f"the run stopped at {state.stopped_at}")
                 _record(recorder, halted)
                 yield halted
     except asyncio.CancelledError, GeneratorExit:
@@ -391,6 +466,97 @@ async def run_workflow(
     )
     _record(recorder, done)
     yield done
+
+
+# ------------------------------------------------------------------- resuming
+
+
+def replay(events: list[Any]) -> Resume | None:
+    """Rebuild what a parked run had done, from its own record.
+
+    Returns None for a record that is not a parked run --- which includes a run
+    that completed, one that failed, and one the process was killed in the
+    middle of. Only a run that stopped *at a gate* has a defined place to pick
+    up: everything else has an unfinished step whose effect nobody knows.
+    """
+    ending = _last(events, "run_finished")
+    parked = _last(events, "step_parked")
+    if ending is None or ending.state != "parked" or parked is None:
+        return None
+    outputs: dict[str, str] = {}
+    completed: set[str] = set()
+    for event in events:
+        if event.type == "step_finished" and event.ok:
+            outputs[event.step] = event.output
+            completed.add(event.step)
+    start = next((e for e in events if e.type == "run_started"), None)
+    if start is not None:
+        outputs.update(start.inputs)
+    return Resume(run_id=ending.run_id, outputs=outputs, completed=completed, at=parked.step)
+
+
+def _last(events: list[Any], kind: str) -> Any:
+    return next((e for e in reversed(events) if e.type == kind), None)
+
+
+def resumable(events: list[Any], workflow: Workflow) -> str:
+    """Why this run cannot be resumed, or "" when it can.
+
+    The fingerprint is the load-bearing check. The outputs in the record were
+    produced by a particular file, and continuing against an edited one would
+    be the engine finishing a plan nobody looked at --- so an edit refuses the
+    resume and says which file moved, rather than doing its best.
+    """
+    start = next((e for e in events if e.type == "run_started"), None)
+    if start is None:
+        return "this record has no beginning, so there is nothing to resume"
+    if start.workflow != workflow.name:
+        return f"this run was {start.workflow}, not {workflow.name}"
+    if not start.fingerprint:
+        return (
+            "this run was recorded before runs carried a fingerprint, so there "
+            "is no way to tell whether the workflow still says what it said "
+            "then. Start it again rather than resuming it."
+        )
+    if start.fingerprint != fingerprint(workflow):
+        return (
+            f"{workflow.name} has changed since this run started. The steps "
+            "already done were planned from a different file, so resuming would "
+            "finish a plan nobody approved. Start it again."
+        )
+    if replay(events) is None:
+        return "this run is not parked, so there is nothing waiting for approval"
+    return ""
+
+
+async def resume_workflow(
+    run_id: str,
+    workflow: Workflow,
+    registry: ToolRegistry,
+    ctx: ToolContext,
+    **kwargs: Any,
+) -> AsyncGenerator[RunEvent]:
+    """Pick up a parked run, with a person at the gate this time.
+
+    Everything else is ``run_workflow``: the same steps, the same gates, the
+    same record --- appended to rather than replaced.
+    """
+    from contextlib import aclosing
+
+    from altus.workflow.runs import read_run
+
+    runs_root = kwargs.get("runs_root")
+    events = read_run(run_id, runs_root)
+    problem = resumable(events, workflow)
+    if problem:
+        raise RunRefused(f"{run_id} cannot be resumed: {problem}")
+    resume = replay(events)
+    assert resume is not None  # `resumable` just said so
+
+    kwargs.setdefault("record", True)
+    async with aclosing(run_workflow(workflow, registry, ctx, resume=resume, **kwargs)) as stream:
+        async for event in stream:
+            yield event
 
 
 # ---------------------------------------------------------------- approvals

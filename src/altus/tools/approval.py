@@ -86,6 +86,37 @@ class DenyAll:
         return Decision.DENY
 
 
+class Parked(Exception):
+    """Nobody was there to answer, so the run stopped instead of guessing.
+
+    Deliberately an exception rather than a ``Decision``. A denial is an answer
+    --- somebody looked and said no --- and a run that treats "nobody was
+    asked" as a denial records a decision that was never made. This unwinds out
+    through the tool, which is the only way the engine can tell the two apart.
+
+    It inherits from ``Exception`` directly and not from anything
+    ``ToolRegistry.execute`` catches, so it reaches the engine rather than
+    becoming an error string in a tool result.
+    """
+
+    def __init__(self, request: ApprovalRequest) -> None:
+        super().__init__(f"{request.tool} needs approval, and this run is unattended")
+        self.request = request
+
+
+@dataclass
+class ParkOnApproval:
+    """The unattended policy: stop at the gate and wait for a person.
+
+    What a triggered run does when it reaches something that needs approval.
+    Not ``DenyAll``, which would record a refusal nobody made, and emphatically
+    not ``AllowAll``, which would make a trigger a way to launder consent.
+    """
+
+    async def request(self, req: ApprovalRequest) -> Decision:
+        raise Parked(req)
+
+
 class AllowAll:
     """Non-interactive consent: `--yes`, and tests."""
 

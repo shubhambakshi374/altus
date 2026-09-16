@@ -7,12 +7,23 @@ Textual to do it.
 """
 
 from altus.workflow.blast import Blast, blast_radius, step_level
-from altus.workflow.engine import RunRefused, RunState, order, run_workflow
+from altus.workflow.engine import (
+    Resume,
+    RunRefused,
+    RunState,
+    order,
+    resumable,
+    resume_workflow,
+    run_workflow,
+    waves,
+)
 from altus.workflow.events import (
     RunEvent,
     RunFinished,
+    RunResumed,
     RunStarted,
     StepFinished,
+    StepParked,
     StepSkipped,
     StepStarted,
 )
@@ -31,9 +42,18 @@ from altus.workflow.models import (
     valid_slug,
 )
 from altus.workflow.refs import refs_in, substitute
-from altus.workflow.runs import RunRecorder, list_runs, read_run, runs_dir, summarise
+from altus.workflow.runs import (
+    RunRecorder,
+    is_parked,
+    list_runs,
+    parked_runs,
+    read_run,
+    runs_dir,
+    summarise,
+)
 from altus.workflow.store import (
     copy_template,
+    fingerprint,
     list_workflows,
     load,
     parse,
@@ -54,14 +74,17 @@ __all__ = [
     "Blast",
     "Input",
     "Problem",
+    "Resume",
     "RunEvent",
     "RunFinished",
     "RunRecorder",
     "RunRefused",
+    "RunResumed",
     "RunStarted",
     "RunState",
     "Step",
     "StepFinished",
+    "StepParked",
     "StepSkipped",
     "StepStarted",
     "ToolStep",
@@ -72,17 +95,22 @@ __all__ = [
     "copy_template",
     "describe",
     "fatal",
+    "fingerprint",
+    "is_parked",
     "list_runs",
     "list_workflows",
     "load",
     "missing_inputs",
     "order",
+    "parked_runs",
     "parse",
     "path_for",
     "read_run",
     "refs_in",
     "render",
     "resolve_inputs",
+    "resumable",
+    "resume_workflow",
     "run_workflow",
     "runnable",
     "runs_dir",
@@ -94,5 +122,6 @@ __all__ = [
     "template_text",
     "templates",
     "valid_slug",
+    "waves",
     "workflows_dir",
 ]

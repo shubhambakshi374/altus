@@ -30,6 +30,19 @@ class RunStarted(BaseModel):
     record because "these two happened in this order" and "these two happened
     at the same time" are different facts about what was done, and a reader a
     month later cannot tell them apart from timestamps alone."""
+    fingerprint: str = ""
+    """A hash of the workflow file as it was when the run started.
+
+    The reason a parked run can be resumed safely: the outputs already in this
+    record were produced by a particular file, and continuing against an edited
+    one would be the engine finishing a plan nobody looked at. Empty on records
+    written before this existed, which are therefore not resumable --- and say
+    so rather than resuming against a guess.
+    """
+    inputs: dict[str, str] = Field(default_factory=dict)
+    """The inputs as resolved at the start, so a resume substitutes the same
+    values rather than re-reading `@git.origin` in whatever checkout happens to
+    be current when somebody gets round to approving it."""
 
 
 class StepStarted(BaseModel):
@@ -62,6 +75,46 @@ class StepWaiting(BaseModel):
     detail: str = ""
 
 
+class RunResumed(BaseModel):
+    """A parked run picked up again, appended to the same record.
+
+    The same record rather than a new one: what happened is one run with a gap
+    in the middle where it waited for a person, and two files would make it two
+    half-runs neither of which reads like the thing that was done.
+    """
+
+    type: Literal["run_resumed"] = "run_resumed"
+    run_id: str
+    workflow: str
+    started: str
+    steps: list[str] = Field(default_factory=list)
+    """What is left to run, not what the run originally had."""
+    blast: Sensitivity = Sensitivity.READ
+    parallel: int = 1
+    at: str = ""
+    """The step it parked on, which is the first one to run again."""
+
+
+class StepParked(BaseModel):
+    """A step that stopped at the gate because the run was unattended.
+
+    Carries the question the gate would have asked --- the tool, where it would
+    land, how sensitive it is --- so the person who resumes sees what it wanted
+    to do rather than "something needed approval".
+    """
+
+    type: Literal["step_parked"] = "step_parked"
+    step: str
+    tool: str = ""
+    action: str = ""
+    path: str = ""
+    """What it would act on. A filesystem tool fills this and leaves `target`
+    empty; a cloud tool fills both."""
+    target: str = ""
+    sensitivity: Sensitivity = Sensitivity.MUTATE
+    detail: str = ""
+
+
 class StepFinished(BaseModel):
     type: Literal["step_finished"] = "step_finished"
     step: str
@@ -84,7 +137,9 @@ class StepSkipped(BaseModel):
 class RunFinished(BaseModel):
     type: Literal["run_finished"] = "run_finished"
     run_id: str
-    state: Literal["completed", "failed", "denied", "cancelled"]
+    state: Literal["completed", "failed", "denied", "cancelled", "parked"]
+    """``parked`` is the one that is not an ending: the run stopped at a gate
+    with nobody there, and `altus workflow resume` picks it up."""
     ran: int = 0
     skipped: int = 0
     seconds: float = 0.0
@@ -92,7 +147,14 @@ class RunFinished(BaseModel):
 
 
 RunEvent = Annotated[
-    RunStarted | StepStarted | StepWaiting | StepFinished | StepSkipped | RunFinished,
+    RunStarted
+    | RunResumed
+    | StepStarted
+    | StepWaiting
+    | StepFinished
+    | StepSkipped
+    | StepParked
+    | RunFinished,
     Field(discriminator="type"),
 ]
 

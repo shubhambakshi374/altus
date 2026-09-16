@@ -85,7 +85,9 @@ def summarise(events: list[Any]) -> str:
     from altus.workflow.events import RunFinished, RunStarted
 
     start = next((e for e in events if isinstance(e, RunStarted)), None)
-    end = next((e for e in events if isinstance(e, RunFinished)), None)
+    # The *last* ending, because a resumed run has two: the park and whatever
+    # happened after somebody approved it.
+    end = next((e for e in reversed(events) if isinstance(e, RunFinished)), None)
     if start is None:
         return "unreadable"
     when = start.started
@@ -94,4 +96,31 @@ def summarise(events: list[Any]) -> str:
         # "completed" here would be the record lying about the one case it
         # exists for.
         return f"{when}  {start.workflow:<20} interrupted"
+    if end.state == "parked":
+        return f"{when}  {start.workflow:<20} parked — {end.detail}"
     return f"{when}  {start.workflow:<20} {end.state} — {end.ran} steps in {end.seconds}s"
+
+
+def is_parked(events: list[Any]) -> bool:
+    """Waiting for a person, rather than finished.
+
+    From the last ending, so a run that parked and was then resumed and
+    completed is not offered for approval a second time.
+    """
+    from altus.workflow.events import RunFinished
+
+    end = next((e for e in reversed(events) if isinstance(e, RunFinished)), None)
+    return end is not None and end.state == "parked"
+
+
+def parked_runs(root: Path | None = None, limit: int = 50) -> list[tuple[str, str]]:
+    """``(run_id, one-line summary)`` for every run waiting on a person."""
+    found: list[tuple[str, str]] = []
+    for run_id in list_runs(root, limit):
+        try:
+            events = read_run(run_id, root)
+        except OSError:
+            continue
+        if is_parked(events):
+            found.append((run_id, summarise(events)))
+    return found

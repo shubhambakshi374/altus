@@ -8,7 +8,10 @@ places where a vendor's own label disagrees with ours stay decided our way.
 
 from __future__ import annotations
 
+import json
 import tomllib
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -31,6 +34,8 @@ from altus.mcp.session import (
     credentials,
     missing_credentials,
 )
+from altus.tools.base import CloudContext, ToolContext
+from altus.workspace import Workspace
 
 SERVERS = [spec.id for spec in CATALOG]
 
@@ -380,3 +385,294 @@ def test_a_tool_without_annotations_says_nothing_either_way() -> None:
     info = ToolInfo.from_mcp(Tool(name="list_issues", inputSchema={"type": "object"}))
     assert info.read_only_hint is None
     assert info.server_says_write is False
+
+
+# --- the tool layer ------------------------------------------------------
+
+
+class FakeMcp:
+    """A provider that records everything, and never opens a socket.
+
+    Shaped like `test_azure.py`'s FakeAzure: the point of it is that `calls`
+    is the evidence for the deny sweep.
+    """
+
+    def __init__(self, tools: dict[str, list[ToolInfo]] | None = None) -> None:
+        self.scopes: dict[str, str] = {}
+        self.urls: dict[str, str] = {}
+        self.calls: list[tuple[str, str, dict[str, Any]]] = []
+        self.results: dict[str, str] = {}
+        self.tools_by_server: dict[str, list[ToolInfo]] = tools or {
+            "github": [
+                ToolInfo("list_issues", "List issues"),
+                ToolInfo("issue_read", "Read one issue"),
+                ToolInfo("get_file_contents", "Read a file"),
+                ToolInfo("add_issue_comment", "Comment on an issue"),
+                ToolInfo("issue_write", "Create or edit an issue"),
+                ToolInfo("delete_repository", "Delete a repository", destructive_hint=True),
+                ToolInfo("brand_new_tool", "Shipped after the manifest was written"),
+            ]
+        }
+
+    async def tools(self, server: str) -> tuple[ToolInfo, ...]:
+        return tuple(self.tools_by_server.get(server, ()))
+
+    async def tool(self, server: str, name: str) -> ToolInfo | None:
+        return next((t for t in await self.tools(server) if t.name == name), None)
+
+    async def call(self, server: str, tool: str, args: dict[str, Any]) -> str:
+        self.calls.append((server, tool, args))
+        return self.results.get(tool, f"{tool} ok")
+
+
+def make_ctx(
+    provider: FakeMcp,
+    *,
+    policy: Any = None,
+    servers: tuple[str, ...] = ("github",),
+    **settings: Any,
+) -> ToolContext:
+    from altus.config.models import McpSettings
+    from altus.tools.approval import AllowAll
+
+    return ToolContext(
+        workspace=Workspace(Path.cwd()),
+        approvals=policy or AllowAll(),
+        cloud=CloudContext(
+            mcp=provider,
+            mcp_settings=McpSettings(servers=list(servers), **settings),
+            protection=ProtectionRules.build(["*prod*"], [], "confirm"),
+        ),
+    )
+
+
+def test_four_tools_however_many_servers_connect() -> None:
+    """Seven servers publish well over two hundred tools between them. The
+    whole point of the meta-tool shape is that none of that is in context."""
+    from altus.config.models import McpSettings
+    from altus.tools.mcp import mcp_tools as build
+
+    assert [t.name for t in build(McpSettings())] == [
+        "mcp_servers",
+        "mcp_tools",
+        "mcp_call",
+        "mcp_do",
+    ]
+
+
+def test_switches_remove_exactly_their_tools() -> None:
+    from altus.config.models import McpSettings
+    from altus.tools.mcp import mcp_tools as build
+
+    assert [t.name for t in build(McpSettings(allow_writes=False))] == [
+        "mcp_servers",
+        "mcp_tools",
+        "mcp_call",
+    ]
+    assert build(McpSettings(enabled=False)) == []
+
+
+def test_a_read_only_registry_carries_no_mcp_do() -> None:
+    from altus.config.models import McpSettings
+    from altus.tools.registry import default_registry
+
+    registry = default_registry(
+        writes=False,
+        kubernetes=False,
+        aws=False,
+        azure=False,
+        gcp=False,
+        mcp=True,
+        mcp_settings=McpSettings(),
+    )
+    assert "mcp_call" in registry
+    assert "mcp_do" not in registry
+
+
+async def test_mcp_call_refuses_a_write_without_contacting_the_server() -> None:
+    from altus.tools.mcp.reads import McpCallTool
+
+    provider = FakeMcp()
+    out = await McpCallTool().run(
+        {"server": "github", "tool": "add_issue_comment", "arguments": {"body": "hi"}},
+        make_ctx(provider),
+    )
+    assert out.is_error
+    assert "mcp_do" in out.content
+    assert provider.calls == []
+
+
+async def test_mcp_do_sends_a_read_back_to_mcp_call() -> None:
+    from altus.tools.mcp.mutations import McpDoTool
+
+    provider = FakeMcp()
+    out = await McpDoTool().run({"server": "github", "tool": "list_issues"}, make_ctx(provider))
+    assert out.is_error
+    assert "mcp_call" in out.content
+    assert provider.calls == []
+
+
+async def test_the_deny_sweep() -> None:
+    """Refused, and the only thing that reached the server was the before-read.
+
+    This is the assertion that caught most of the bugs in all four clouds.
+    """
+    from altus.tools.approval import Decision, RecordingPolicy
+    from altus.tools.mcp.mutations import McpDoTool
+
+    policy = RecordingPolicy(decision=Decision.DENY)
+    provider = FakeMcp()
+    out = await McpDoTool().run(
+        {"server": "github", "tool": "issue_write", "arguments": {"owner": "acme", "repo": "b"}},
+        make_ctx(provider, policy=policy),
+    )
+    assert out.denied
+    assert [tool for _s, tool, _a in provider.calls] == ["issue_read"]
+
+
+async def test_the_prompt_never_claims_a_preview() -> None:
+    from altus.tools.approval import RecordingPolicy
+    from altus.tools.mcp.mutations import McpDoTool
+
+    policy = RecordingPolicy()
+    provider = FakeMcp()
+    provider.results["issue_read"] = "title: Billing is down\nstate: open"
+    await McpDoTool().run(
+        {
+            "server": "github",
+            "tool": "issue_write",
+            "arguments": {"owner": "acme", "repo": "billing"},
+        },
+        make_ctx(provider, policy=policy),
+    )
+    request = policy.seen[0]
+    assert "no preview exists" in request.dry_run
+    assert "validated" not in request.dry_run
+    assert "Billing is down" in request.dry_run
+    assert request.target == "github: acme · billing"
+
+
+async def test_a_tool_the_manifest_never_saw_says_so_in_the_prompt() -> None:
+    from altus.tools.approval import RecordingPolicy
+    from altus.tools.mcp.mutations import McpDoTool
+
+    policy = RecordingPolicy()
+    provider = FakeMcp()
+    await McpDoTool().run(
+        {"server": "github", "tool": "brand_new_tool", "arguments": {"owner": "acme"}},
+        make_ctx(provider, policy=policy),
+    )
+    request = policy.seen[0]
+    assert request.sensitivity is Sensitivity.PRIVILEGED
+    assert request.needs_challenge
+    assert not request.may_grant_always
+    assert "not in Altus's manifest" in request.dry_run
+
+
+async def test_a_protected_target_demands_a_typed_confirmation() -> None:
+    from altus.tools.approval import RecordingPolicy
+    from altus.tools.mcp.mutations import McpDoTool
+
+    policy = RecordingPolicy()
+    provider = FakeMcp()
+    await McpDoTool().run(
+        {
+            "server": "github",
+            "tool": "add_issue_comment",
+            "arguments": {"owner": "acme", "repo": "prod-billing"},
+        },
+        make_ctx(provider, policy=policy),
+    )
+    assert policy.seen[0].protected
+    assert policy.seen[0].needs_challenge
+
+
+async def test_writes_disabled_refuses_before_anything_is_resolved() -> None:
+    from altus.tools.mcp.mutations import McpDoTool
+
+    provider = FakeMcp()
+    out = await McpDoTool().run(
+        {"server": "github", "tool": "add_issue_comment"},
+        make_ctx(provider, allow_writes=False),
+    )
+    assert out.is_error
+    assert "allow_writes" in out.content
+    assert provider.calls == []
+
+
+async def test_a_json_result_is_redacted_structurally() -> None:
+    """The name/value shape --- which is what these servers actually return."""
+    from altus.tools.mcp.reads import McpCallTool
+
+    provider = FakeMcp()
+    provider.results["list_issues"] = json.dumps(
+        [{"name": "API_TOKEN", "value": "sk-live-abcdef"}, {"name": "REGION", "value": "eu-west-1"}]
+    )
+    out = await McpCallTool().run({"server": "github", "tool": "list_issues"}, make_ctx(provider))
+    assert "sk-live-abcdef" not in out.content
+    assert "redacted" in out.content
+    assert "eu-west-1" in out.content, "redaction must not blank things that are not secret"
+
+
+async def test_a_text_result_falls_through_to_the_text_scrubber() -> None:
+    """`redact` does nothing to a string. Running only the structured pass over
+    free text reads as working and redacts nothing at all."""
+    from altus.tools.mcp.reads import McpCallTool
+
+    provider = FakeMcp()
+    provider.results["list_issues"] = "PATH=/usr/bin\nDB_PASSWORD=hunter2\nstate: open"
+    out = await McpCallTool().run({"server": "github", "tool": "list_issues"}, make_ctx(provider))
+    assert "hunter2" not in out.content
+    assert "/usr/bin" in out.content
+
+
+async def test_rows_are_capped() -> None:
+    """Snowflake and Databricks answer with rows, and every row reaches the
+    model provider."""
+    from altus.tools.mcp.reads import McpCallTool
+
+    provider = FakeMcp()
+    provider.results["list_issues"] = "\n".join(f"row {i}" for i in range(500))
+    out = await McpCallTool().run(
+        {"server": "github", "tool": "list_issues"}, make_ctx(provider, max_rows=10)
+    )
+    assert "showing 10 of 500 rows" in out.content
+    assert "row 11" not in out.content
+
+
+async def test_mcp_tools_reports_sensitivity_for_every_tool() -> None:
+    from altus.tools.mcp.reads import McpToolsTool
+
+    out = await McpToolsTool().run({}, make_ctx(FakeMcp()))
+    assert out.visual is not None
+    levels = {row[2] for row in out.visual.rows}
+    assert levels == {"read", "mutate", "privileged"}
+
+
+async def test_mcp_servers_says_where_results_go() -> None:
+    from altus.tools.mcp.reads import McpServersTool
+
+    out = await McpServersTool().run({}, make_ctx(FakeMcp()))
+    assert "leaves this machine" in out.content
+    assert "documented" in out.content
+
+
+async def test_mcp_servers_check_reports_drift() -> None:
+    from altus.tools.mcp.reads import McpServersTool
+
+    out = await McpServersTool().run({"check": True}, make_ctx(FakeMcp()))
+    assert "brand_new_tool" in out.content
+    assert "not in the manifest" in out.content
+
+
+async def test_a_server_with_no_credentials_is_not_callable() -> None:
+    from altus.tools.mcp.reads import McpCallTool
+
+    provider = FakeMcp()
+    out = await McpCallTool().run(
+        {"server": "grafana", "tool": "list_datasources"},
+        make_ctx(provider, servers=("github",)),
+    )
+    assert out.is_error
+    assert "not enabled" in out.summary
+    assert provider.calls == []

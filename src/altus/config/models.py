@@ -43,6 +43,9 @@ class ToolSettings(BaseModel):
     max_file_bytes: int = 262_144
     max_output_bytes: int = 102_400
     """Total tool-result bytes per loop iteration."""
+    git: bool = True
+    """The local git tools --- branch, commit, push, and the reads. Needed by
+    any workflow that fixes something and raises a pull request."""
 
 
 class Profile(BaseModel):

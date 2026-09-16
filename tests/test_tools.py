@@ -34,8 +34,10 @@ def ctx(tree: Path) -> ToolContext:
 
 @pytest.fixture
 def registry():  # type: ignore[no-untyped-def]
-    # Filesystem tools only: the cloud sets have their own test modules.
-    return default_registry(kubernetes=False, aws=False, azure=False, gcp=False, mcp=False)
+    # Filesystem tools only: the cloud sets and git have their own test modules.
+    return default_registry(
+        kubernetes=False, aws=False, azure=False, gcp=False, mcp=False, git=False
+    )
 
 
 async def run(registry, name, args, ctx):  # type: ignore[no-untyped-def]
@@ -299,7 +301,7 @@ def test_registry_can_omit_the_write_tools() -> None:
     from altus.tools import default_registry as make
 
     assert make(
-        writes=False, kubernetes=False, aws=False, azure=False, gcp=False, mcp=False
+        writes=False, kubernetes=False, aws=False, azure=False, gcp=False, mcp=False, git=False
     ).names == [
         "glob",
         "grep",
@@ -369,3 +371,23 @@ def test_writes_off_means_no_writes_anywhere() -> None:
     mutating = [name for name in registry.names if not registry.is_read_only(name)]
     assert mutating == [], f"writes=False still registered: {mutating}"
     assert len(registry.names) > 10, "and the reads are all still there"
+
+
+# --------------------------------------------------------------------- git
+
+
+def test_the_git_tools_are_registered_by_default() -> None:
+    """No SDK and no credentials, only a `git` binary that every path here
+    already assumes --- so they are on unless `[tools] git = false`."""
+    from altus.tools import default_registry as make
+
+    names = make(kubernetes=False, aws=False, azure=False, gcp=False, mcp=False).names
+    assert {"git_status", "git_log", "git_diff", "git_branch", "git_commit", "git_push"} <= set(
+        names
+    )
+    assert (
+        "git_push"
+        not in make(
+            writes=False, kubernetes=False, aws=False, azure=False, gcp=False, mcp=False
+        ).names
+    ), "a read-only session cannot push"

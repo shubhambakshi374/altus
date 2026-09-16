@@ -1086,3 +1086,149 @@ def test_a_read_only_registry_carries_no_gcp_change(tmp_path: Any) -> None:
     )
     assert "gcp_call" in registry
     assert "gcp_write" not in registry
+
+
+# ---------------------------------------------------- the gcloud CLI fallback
+
+
+def gcloud_tool() -> Any:
+    from altus.tools.cli import GcloudTool
+
+    return GcloudTool()
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        (["compute", "instances", "list"], Sensitivity.READ),
+        (["compute", "instances", "describe"], Sensitivity.READ),
+        (["projects", "list"], Sensitivity.READ),
+        (["storage", "buckets", "list"], Sensitivity.READ),
+        (["storage", "buckets", "get-iam-policy"], Sensitivity.READ),
+        # Reads shaped like reads that hand back a live credential.
+        (["container", "clusters", "get-credentials"], Sensitivity.SENSITIVE_READ),
+        (["secrets", "versions", "access"], Sensitivity.SENSITIVE_READ),
+        # Ordinary changes.
+        (["compute", "instances", "create"], Sensitivity.MUTATE),
+        (["compute", "instances", "start"], Sensitivity.MUTATE),
+        (["compute", "instances", "stop"], Sensitivity.MUTATE),
+        # The dangerous end.
+        (["compute", "instances", "delete"], Sensitivity.PRIVILEGED),
+        (["storage", "buckets", "delete"], Sensitivity.PRIVILEGED),
+        (["storage", "buckets", "add-iam-policy-binding"], Sensitivity.PRIVILEGED),
+        (["projects", "add-iam-policy-binding"], Sensitivity.PRIVILEGED),
+        (["iam", "service-accounts", "keys", "create"], Sensitivity.PRIVILEGED),
+        (["compute", "firewall-rules", "create"], Sensitivity.PRIVILEGED),
+    ],
+)
+def test_gcloud_classification(command: list[str], expected: Sensitivity) -> None:
+    assert gcloud_tool().classify(command) is expected
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["auth", "login"],
+        ["auth", "application-default", "login"],
+        ["organizations", "list"],
+        ["brand-new-service", "list"],
+        ["compute"],
+    ],
+)
+def test_an_unmapped_gcloud_group_fails_closed(command: list[str]) -> None:
+    """The table is a short allowlist, not an attempt at completeness. That is
+    what catches `gcloud auth`, `gcloud organizations`, and every command a
+    future release adds."""
+    assert gcloud_tool().classify(command) is Sensitivity.PRIVILEGED
+
+
+def test_a_longer_group_wins_over_a_shorter_one() -> None:
+    """Both `compute networks` and `compute networks subnets` are real groups,
+    so the longest matching prefix has to win or subnets would be read as a
+    verb on networks."""
+    assert gcloud_tool().classify(["compute", "networks", "subnets", "list"]) is Sensitivity.READ
+    assert gcloud_tool().classify(["compute", "networks", "list"]) is Sensitivity.READ
+
+
+@pytest.mark.parametrize(
+    ("command", "method"),
+    [
+        (["compute", "instances", "delete"], "compute.instances.delete"),
+        (["compute", "instances", "list"], "compute.instances.list"),
+        (["compute", "instances", "start"], "compute.instances.start"),
+        (["storage", "buckets", "add-iam-policy-binding"], "storage.buckets.setIamPolicy"),
+        (["iam", "service-accounts", "keys", "create"], "iam.projects.serviceAccounts.keys.create"),
+        (["secrets", "versions", "access"], "secretmanager.projects.secrets.versions.access"),
+    ],
+)
+def test_the_cli_and_the_api_agree(command: list[str], method: str) -> None:
+    """One command must not get two different answers depending on which door
+    it came through. This is the test that would have caught the AWS drift bug
+    had it existed then."""
+    assert gcloud_tool().classify(command) is gcp.classify(method)
+
+
+@pytest.mark.parametrize(
+    "flag", ["--project", "--account", "--impersonate-service-account", "--configuration"]
+)
+async def test_gcloud_refuses_a_flag_that_retargets_it(tmp_path: Any, flag: str) -> None:
+    """Every one of these changes the project or the identity, so a command
+    carrying its own would be approved against a target it is not going to
+    touch. --impersonate-service-account is the sharpest: it changes who the
+    command runs as without changing anything else the prompt would show."""
+    ctx = context(tmp_path, FakeGcp())
+    ctx.cloud.cli_allowlist = ("gcloud",)
+    outcome = await gcloud_tool().run(
+        {"args": ["compute", "instances", "list", flag, "other"]}, ctx
+    )
+    assert outcome.is_error
+    assert outcome.summary == "reserved flag"
+    assert flag in outcome.content
+
+
+async def test_gcloud_is_handed_the_session_project(tmp_path: Any, monkeypatch: Any) -> None:
+    """Supplied by Altus, the way kubectl is given --context."""
+    import altus.tools.cli as cli_module
+
+    seen: list[list[str]] = []
+
+    async def fake_execute(path: str, argv: list[str], **kw: Any) -> tuple[int, str, str]:
+        seen.append(argv)
+        return 0, "[]", ""
+
+    monkeypatch.setattr(cli_module.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(cli_module, "_execute", fake_execute)
+
+    ctx = context(tmp_path, FakeGcp())
+    ctx.cloud.cli_allowlist = ("gcloud",)
+    outcome = await gcloud_tool().run({"args": ["compute", "instances", "list"]}, ctx)
+    assert not outcome.is_error
+    assert seen == [["compute", "instances", "list", "--project", "demo-project"]]
+
+
+def test_gcloud_can_be_switched_off_without_taking_kubectl(tmp_path: Any) -> None:
+    settings = CloudSettings()
+    settings.gcp.allow_cli = False
+    names = default_registry(
+        kubernetes=False, aws=False, azure=False, gcp=False, cloud=settings
+    ).names
+    assert "gcp_cli" not in names
+    assert "k8s_kubectl" in names
+
+
+# ------------------------------------------------------------ the front door
+
+
+def test_the_gcp_dashboard_uses_the_gcp_panels() -> None:
+    from altus.tui.screens.dashboard import GCP_PANELS, PANELS_BY_CLOUD, DashboardScreen
+
+    screen = DashboardScreen("demo-project", cloud="gcp")
+    assert screen.panels == GCP_PANELS
+    assert {tool for _title, tool, _args in GCP_PANELS} <= {
+        "gcp_topology",
+        "gcp_inventory",
+        "gcp_cost",
+        "gcp_whoami",
+    }
+    assert set(PANELS_BY_CLOUD) == {"k8s", "aws", "azure", "gcp"}
+    assert all(args == {} for _title, _tool, args in GCP_PANELS)

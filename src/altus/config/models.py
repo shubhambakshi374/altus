@@ -184,6 +184,60 @@ class GcpSettings(BaseModel):
     the model pays for every row."""
 
 
+class McpServerSettings(BaseModel):
+    """Per-server settings for one of the shipped MCP servers."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool | None = None
+    """None means autodetect: offer it when its credentials are present."""
+    url: str = ""
+    """Overrides the catalogued endpoint. Required for the two vendors whose
+    URL contains the customer's own account or workspace."""
+    scope: str = ""
+    """The endpoint path that decides what it can do --- Databricks
+    `genie/<space>`, `vector-search/<catalog>/<schema>`, `functions/...`."""
+    toolsets: list[str] = Field(default_factory=list)
+    """Narrows what the server offers at all, where it supports that. Fewer
+    tools is less to classify and less that can drift."""
+
+
+class McpSettings(BaseModel):
+    """The MCP servers Altus ships kitted out.
+
+    Deliberately not a place to name arbitrary servers. Altus classifies tools
+    against a curated manifest, and a server with no manifest would have every
+    tool fail closed to privileged --- a challenge on every call, which is how
+    a challenge stops being read.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    servers: list[str] = Field(default_factory=list)
+    """Empty means every server whose credentials are present."""
+    allow_writes: bool = True
+    """Any mutating call at all. Turning this off also passes the servers'
+    own read-only switches --- GitHub's GITHUB_READ_ONLY and Grafana's
+    --disable-write --- so Altus is not the only thing enforcing it."""
+    timeout: float = 30.0
+    max_rows: int = 200
+    """Query result rows. Snowflake, Databricks and the SQL-shaped tools
+    return data rather than metadata, and every row reaches the model."""
+    max_result_bytes: int = 100_000
+    github: McpServerSettings = Field(default_factory=McpServerSettings)
+    atlassian: McpServerSettings = Field(default_factory=McpServerSettings)
+    grafana: McpServerSettings = Field(default_factory=McpServerSettings)
+    datadog: McpServerSettings = Field(default_factory=McpServerSettings)
+    newrelic: McpServerSettings = Field(default_factory=McpServerSettings)
+    snowflake: McpServerSettings = Field(default_factory=McpServerSettings)
+    databricks: McpServerSettings = Field(default_factory=McpServerSettings)
+
+    def for_server(self, server: str) -> McpServerSettings:
+        found = getattr(self, server, None)
+        return found if isinstance(found, McpServerSettings) else McpServerSettings()
+
+
 class CloudSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -271,6 +325,7 @@ class Config(BaseModel):
     workspace: WorkspaceSettings = Field(default_factory=WorkspaceSettings)
     tools: ToolSettings = Field(default_factory=ToolSettings)
     cloud: CloudSettings = Field(default_factory=CloudSettings)
+    mcp: McpSettings = Field(default_factory=McpSettings)
     ui: UISettings = Field(default_factory=UISettings)
 
     def provider_settings(self, name: str) -> ProviderSettings:

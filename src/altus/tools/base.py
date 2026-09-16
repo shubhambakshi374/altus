@@ -61,6 +61,13 @@ class CloudContext:
     """A ``altus.config.models.GcpSettings``. Checked at the gate for the same
     reason the other two are: the same gcp_write sets a label and an IAM
     policy."""
+    mcp: Any = None
+    """An ``altus.mcp.session.McpProvider``; typed loosely so ``tools.base`` does
+    not import the MCP SDK at module scope."""
+    mcp_settings: Any = None
+    """An ``altus.config.models.McpSettings``. Checked at the gate for the same
+    reason its cloud namesakes are: the same mcp_do comments on an issue and
+    deletes a repository."""
     exec_timeout: int = 60
     cli_allowlist: tuple[str, ...] = ()
     """Binaries the CLI fallback may run. Registration already filters on this,

@@ -23,6 +23,14 @@ from altus.mcp.classify import (
     target_for,
     why_unknown,
 )
+from altus.mcp.session import (
+    McpError,
+    McpProvider,
+    _stdio_params,
+    credential,
+    credentials,
+    missing_credentials,
+)
 
 SERVERS = [spec.id for spec in CATALOG]
 
@@ -260,3 +268,115 @@ def test_a_production_target_is_protected_with_no_new_config() -> None:
 
 def test_missing_target_arguments_do_not_crash() -> None:
     assert target_for("github", {}).render() == "github"
+
+
+# --- credentials and transport -------------------------------------------
+
+
+def test_the_environment_beats_the_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
+    import keyring
+
+    spec = server_spec("github")
+    assert spec is not None
+    keyring.set_password("altus", "mcp:github:GITHUB_PERSONAL_ACCESS_TOKEN", "stored")
+    monkeypatch.setenv("GITHUB_PERSONAL_ACCESS_TOKEN", "exported")
+    assert credential(spec, "GITHUB_PERSONAL_ACCESS_TOKEN") == "exported"
+    monkeypatch.delenv("GITHUB_PERSONAL_ACCESS_TOKEN")
+    assert credential(spec, "GITHUB_PERSONAL_ACCESS_TOKEN") == "stored"
+
+
+def test_a_broken_keyring_is_not_fatal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A locked or missing backend must degrade to "no credential", not crash."""
+    import keyring
+
+    def boom(_service: str, _user: str) -> str:
+        raise RuntimeError("no backend")
+
+    monkeypatch.setattr(keyring, "get_password", boom)
+    spec = server_spec("github")
+    assert spec is not None
+    assert credential(spec, "GITHUB_PERSONAL_ACCESS_TOKEN") is None
+
+
+def test_datadog_needs_both_of_its_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One of a two-header pair is not partial credentials, it is none."""
+    spec = server_spec("datadog")
+    assert spec is not None
+    monkeypatch.setenv("DD_API_KEY", "k")
+    monkeypatch.delenv("DD_APPLICATION_KEY", raising=False)
+    assert missing_credentials(spec) == ("DD_APPLICATION_KEY",)
+    monkeypatch.setenv("DD_APPLICATION_KEY", "a")
+    assert missing_credentials(spec) == ()
+
+
+async def test_a_call_without_credentials_never_opens_a_connection() -> None:
+    provider = McpProvider()
+    with pytest.raises(McpError, match="no credentials"):
+        await provider.call("github", "list_issues", {})
+
+
+async def test_an_unshipped_server_is_refused_before_anything_is_dialled() -> None:
+    provider = McpProvider()
+    with pytest.raises(McpError, match="not a server Altus ships"):
+        await provider.call("evil-corp", "do_thing", {})
+
+
+def test_an_unfilled_endpoint_is_a_configuration_error_not_a_request() -> None:
+    """Snowflake's URL contains the customer's own account. Sending a request
+    at a URL still containing `{account}` would just be a confusing 404."""
+    provider = McpProvider()
+    spec = server_spec("snowflake")
+    assert spec is not None
+    with pytest.raises(McpError, match="account"):
+        provider.url_for(spec)
+    provider.urls["snowflake"] = "https://acme.snowflakecomputing.com/api/v2/mcp"
+    assert provider.url_for(spec).endswith("/api/v2/mcp")
+
+
+def test_the_databricks_scope_lands_in_the_url() -> None:
+    provider = McpProvider(scopes={"databricks": "genie/01ef"})
+    spec = server_spec("databricks")
+    assert spec is not None
+    provider.urls["databricks"] = "https://acme.databricks.com/api/2.0/mcp/{scope}"
+    assert provider.url_for(spec).endswith("/api/2.0/mcp/genie/01ef")
+
+
+def test_a_stdio_server_is_handed_only_what_it_needs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Passing a subprocess os.environ would hand it every other credential
+    on the machine --- the AWS keys, the Anthropic key, all of it."""
+    monkeypatch.setenv("GRAFANA_API_KEY", "g")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-leak")
+    spec = server_spec("grafana")
+    assert spec is not None
+    params = _stdio_params(spec, credentials(spec))
+    assert params.env is not None
+    assert set(params.env) == {"PATH", "GRAFANA_API_KEY"}
+
+
+def test_annotations_are_read_off_the_real_sdk_shape() -> None:
+    """The SDK names these read_only_hint; the wire format says readOnlyHint.
+
+    Reading only one spelling means every annotation arrives as None, which
+    would silently disable the escalation rule rather than fail visibly.
+    """
+    from mcp.types import Tool, ToolAnnotations
+
+    tool = Tool(
+        name="delete_repository",
+        description="Delete a repository",
+        inputSchema={"type": "object"},
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True),
+    )
+    info = ToolInfo.from_mcp(tool)
+    assert info.name == "delete_repository"
+    assert info.read_only_hint is False
+    assert info.destructive_hint is True
+    assert info.server_says_write
+
+
+def test_a_tool_without_annotations_says_nothing_either_way() -> None:
+    from mcp.types import Tool
+
+    info = ToolInfo.from_mcp(Tool(name="list_issues", inputSchema={"type": "object"}))
+    assert info.read_only_hint is None
+    assert info.server_says_write is False

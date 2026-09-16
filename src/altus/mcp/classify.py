@@ -81,6 +81,14 @@ STATEFUL = re.compile(
 DESTROY = re.compile(r"(^|_)(delete|destroy|drop|purge|remove|erase)(_|$)", re.IGNORECASE)
 
 
+def _hint(notes: Any, *names: str) -> bool | None:
+    for name in names:
+        found = getattr(notes, name, None)
+        if found is not None:
+            return bool(found)
+    return None
+
+
 @dataclass(frozen=True)
 class ToolInfo:
     """A tool as the server described it, annotations included."""
@@ -96,13 +104,20 @@ class ToolInfo:
 
     @classmethod
     def from_mcp(cls, tool: Any) -> ToolInfo:
-        """Build from the SDK's ``Tool``, which may or may not carry annotations."""
+        """Build from the SDK's ``Tool``, which may or may not carry annotations.
+
+        Both spellings are read. The protocol wire format is ``readOnlyHint``,
+        the installed Python SDK exposes the field as ``read_only_hint``, and
+        reading only one of them means every annotation silently arrives as
+        ``None`` --- which would quietly disable the escalation rule rather
+        than break anything visibly.
+        """
         notes = getattr(tool, "annotations", None)
         return cls(
             name=str(getattr(tool, "name", "")),
             description=str(getattr(tool, "description", "") or ""),
-            read_only_hint=getattr(notes, "readOnlyHint", None),
-            destructive_hint=getattr(notes, "destructiveHint", None),
+            read_only_hint=_hint(notes, "read_only_hint", "readOnlyHint"),
+            destructive_hint=_hint(notes, "destructive_hint", "destructiveHint"),
         )
 
 

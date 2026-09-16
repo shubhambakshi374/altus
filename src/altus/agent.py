@@ -308,7 +308,9 @@ def build_cloud_context(config: Config) -> CloudContext:
     """Cluster state for the tools. The client itself is built lazily, so a
     session that never mentions Kubernetes never connects to one."""
     from altus.cloud.base import ProtectionRules, integration
+    from altus.mcp.catalog import CATALOG
 
+    MCP_SERVERS = [spec.id for spec in CATALOG]
     settings = config.cloud
     kubeconfigs = tuple(settings.kubeconfigs)
     provider = None
@@ -339,6 +341,18 @@ def build_cloud_context(config: Config) -> CloudContext:
 
         gcp_provider = GcpProvider(
             project=settings.gcp_project or "", max_results=settings.gcp.max_results
+        )
+
+    mcp_provider = None
+    mcp_entry = integration("mcp")
+    if mcp_entry and mcp_entry.available and config.mcp.enabled:
+        from altus.mcp.session import McpProvider
+
+        mcp_provider = McpProvider(
+            timeout=config.mcp.timeout,
+            max_result_bytes=config.mcp.max_result_bytes,
+            scopes={s: config.mcp.for_server(s).scope for s in MCP_SERVERS},
+            urls={s: config.mcp.for_server(s).url for s in MCP_SERVERS},
         )
 
     forwards = None
@@ -375,6 +389,8 @@ def build_cloud_context(config: Config) -> CloudContext:
         gcp=gcp_provider,
         gcp_project=settings.gcp_project or "",
         gcp_settings=settings.gcp,
+        mcp=mcp_provider,
+        mcp_settings=config.mcp,
         exec_timeout=settings.k8s.exec_timeout,
         allow_rbac_writes=settings.k8s.allow_rbac_writes,
         cli_allowlist=tuple(settings.cli_allowlist),

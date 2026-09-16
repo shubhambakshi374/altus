@@ -63,9 +63,9 @@ def status(cloud: str, *, extra_kubeconfigs: tuple[str, ...] = ()) -> CloudStatu
 
 
 def all_status(extra_kubeconfigs: tuple[str, ...] = ()) -> list[CloudStatus]:
-    from altus.cloud.base import INTEGRATIONS
+    from altus.cloud.base import cloud_integrations
 
-    return [status(i.name, extra_kubeconfigs=extra_kubeconfigs) for i in INTEGRATIONS]
+    return [status(i.name, extra_kubeconfigs=extra_kubeconfigs) for i in cloud_integrations()]
 
 
 # --------------------------------------------------------------------- per cloud

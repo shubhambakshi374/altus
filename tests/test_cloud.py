@@ -444,10 +444,18 @@ def test_context_target_includes_namespace(
 
 
 def test_integrations_report_availability_and_install_hints() -> None:
-    assert {i.name for i in INTEGRATIONS} == {"k8s", "aws", "azure", "gcp"}
+    assert {i.name for i in INTEGRATIONS} == {"k8s", "aws", "azure", "gcp", "mcp"}
     entry = integration("k8s")
     assert entry is not None
     assert "--extra k8s" in entry.install_hint
+
+
+def test_only_clouds_can_be_logged_in_to() -> None:
+    """MCP is an extra to install, not a cloud to sign in to, so `/login` must
+    not offer it --- `auth.status` has no per-cloud handler for it."""
+    from altus.cloud.base import cloud_integrations
+
+    assert {i.name for i in cloud_integrations()} == {"k8s", "aws", "azure", "gcp"}
 
 
 def test_missing_integration_is_reported_not_crashed(monkeypatch: pytest.MonkeyPatch) -> None:

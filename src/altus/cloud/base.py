@@ -102,12 +102,16 @@ class ProtectionRules:
 
 @dataclass
 class Integration:
-    """One cloud, and whether its SDK is actually installed."""
+    """One optional capability, and whether its SDK is actually installed."""
 
     name: str
     extra: str
     modules: tuple[str, ...]
     summary: str
+    is_cloud: bool = True
+    """Whether `/login` and `auth.status` know how to talk about it. MCP is an
+    integration with an extra to install and no cloud to sign in to, so it
+    appears under `/tools` but never under `/login`."""
     _available: bool | None = field(default=None, repr=False)
 
     @property
@@ -140,11 +144,23 @@ INTEGRATIONS: tuple[Integration, ...] = (
     Integration("aws", "aws", ("boto3", "botocore"), "AWS accounts"),
     Integration("azure", "azure", ("azure.identity",), "Azure subscriptions"),
     Integration("gcp", "gcp", ("googleapiclient", "google.auth"), "Google Cloud projects"),
+    Integration(
+        "mcp",
+        "mcp",
+        ("mcp",),
+        "MCP servers (GitHub, Jira, Grafana, ...)",
+        is_cloud=False,
+    ),
 )
 
 
 def integration(name: str) -> Integration | None:
     return next((i for i in INTEGRATIONS if i.name == name), None)
+
+
+def cloud_integrations() -> tuple[Integration, ...]:
+    """The ones `/login` can report on."""
+    return tuple(i for i in INTEGRATIONS if i.is_cloud)
 
 
 def available_integrations() -> tuple[Integration, ...]:

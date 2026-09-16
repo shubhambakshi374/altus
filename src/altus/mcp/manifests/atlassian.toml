@@ -1,0 +1,47 @@
+# Atlassian's hosted Rovo MCP server: Jira, Confluence, Bitbucket Cloud, Jira
+# Service Management and Compass behind one endpoint.
+#
+# Atlassian documents this server by permission scope --- `read_jira`,
+# `write_jira`, `delete_jira`, `read_bitbucket` and so on --- rather than by
+# publishing a complete list of tool names. The Jira names below are the ones
+# actually observed on the server; Confluence, Bitbucket, JSM and Compass names
+# are NOT verified and are deliberately absent, so they classify privileged and
+# `mcp_servers` reports them as drift.
+#
+# That is the honest state of this manifest rather than a gap to paper over:
+# guessing `createConfluencePage` and being wrong would mean a write running
+# under a read's classification. Connecting to a real site and re-recording
+# this file with source = "measured" is what fixes it.
+source = "documented"
+recorded = "2026-09-16"
+reference = "https://atlassian.github.io/atlassian-mcp-server/"
+target_fields = ["cloudId", "projectKey", "issueIdOrKey"]
+
+[tools]
+# shared --- resolve the user and the site
+atlassianUserInfo = "read"
+getAccessibleAtlassianResources = "read"
+
+# Jira reads
+getJiraIssue = "read"
+getJiraIssueRemoteIssueLinks = "read"
+getJiraIssueTypeMetaWithFields = "read"
+getJiraProjectIssueTypesMetadata = "read"
+getIssueLinkTypes = "read"
+getTransitionsForJiraIssue = "read"
+getVisibleJiraProjects = "read"
+lookupJiraAccountId = "read"
+searchJiraIssuesUsingJql = "read"
+
+# Jira writes
+addCommentToJiraIssue = "mutate"
+addWorklogToJiraIssue = "mutate"
+createJiraIssue = "mutate"
+editJiraIssue = "mutate"
+transitionJiraIssue = "mutate"
+
+[before]
+editJiraIssue = "getJiraIssue"
+addCommentToJiraIssue = "getJiraIssue"
+addWorklogToJiraIssue = "getJiraIssue"
+transitionJiraIssue = "getTransitionsForJiraIssue"

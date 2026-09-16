@@ -80,7 +80,9 @@ def default_registry(
     aws: bool | None = None,
     azure: bool | None = None,
     gcp: bool | None = None,
+    mcp: bool | None = None,
     cloud: Any = None,
+    mcp_settings: Any = None,
 ) -> ToolRegistry:
     """The tool set for a session.
 
@@ -92,9 +94,13 @@ def default_registry(
 
     ``cloud`` is a ``CloudSettings``; None means every class is on.
 
-    ``kubernetes``, ``aws``, ``azure`` and ``gcp`` default to autodetection from
-    what is installed. Pass False for any of them to build a registry without it ---
-    which is what a test wanting only the filesystem tools should do.
+    ``kubernetes``, ``aws``, ``azure``, ``gcp`` and ``mcp`` default to
+    autodetection from what is installed. Pass False for any of them to build a
+    registry without it --- which is what a test wanting only the filesystem
+    tools should do.
+
+    ``mcp_settings`` is an ``McpSettings``; it lives outside ``CloudSettings``
+    because MCP is not a cloud.
     """
     tools: list[Tool] = [ReadFileTool(), ListDirTool(), GlobTool(), GrepTool()]
     if writes:
@@ -141,6 +147,16 @@ def default_registry(
         from altus.tools.gcp import gcp_tools
 
         tools += list(gcp_tools(getattr(cloud, "gcp", None)))
+
+    if mcp is None:
+        from altus.cloud.base import integration
+
+        mcp_entry = integration("mcp")
+        mcp = bool(mcp_entry and mcp_entry.available)
+    if mcp:
+        from altus.tools.mcp import mcp_tools
+
+        tools += list(mcp_tools(mcp_settings))
 
     if _cli_enabled(cloud):
         from altus.tools.cli import cli_tools

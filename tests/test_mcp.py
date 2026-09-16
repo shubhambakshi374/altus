@@ -1,0 +1,764 @@
+"""The MCP classifier, over the manifests that actually ship.
+
+Unlike the four clouds there is no corpus to sweep, so these tests do the next
+best thing: they assert the shipped manifests are internally consistent, that
+the classifier only ever escalates what a manifest says, and that the two
+places where a vendor's own label disagrees with ours stay decided our way.
+"""
+
+from __future__ import annotations
+
+import json
+import tomllib
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from altus.cloud.base import ProtectionRules, Sensitivity
+from altus.mcp.catalog import CATALOG, DATABRICKS_SCOPES, Transport, server_spec
+from altus.mcp.classify import (
+    MANIFESTS,
+    ToolInfo,
+    classify,
+    drift,
+    manifest,
+    target_for,
+    why_unknown,
+)
+from altus.mcp.session import (
+    McpError,
+    McpProvider,
+    _stdio_params,
+    credential,
+    credentials,
+    missing_credentials,
+)
+from altus.tools.base import CloudContext, ToolContext
+from altus.workspace import Workspace
+
+SERVERS = [spec.id for spec in CATALOG]
+
+
+# --- the catalog ---------------------------------------------------------
+
+
+def test_catalog_ids_are_unique() -> None:
+    assert len(SERVERS) == len(set(SERVERS))
+
+
+@pytest.mark.parametrize("server", SERVERS)
+def test_every_catalogued_server_ships_a_manifest(server: str) -> None:
+    assert (MANIFESTS / f"{server}.toml").is_file()
+
+
+@pytest.mark.parametrize("server", SERVERS)
+def test_a_server_says_how_to_reach_it_and_how_to_authenticate(server: str) -> None:
+    spec = server_spec(server)
+    assert spec is not None
+    assert spec.products and spec.summary and spec.reference
+    if spec.transport is Transport.HTTP:
+        assert spec.url
+    else:
+        assert spec.command
+    assert spec.env, "detection needs at least one credential variable to look for"
+
+
+@pytest.mark.parametrize("server", SERVERS)
+def test_availability_never_hits_the_network(server: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`/mcp` calls this for every server; it must not be able to hang."""
+    spec = server_spec(server)
+    assert spec is not None
+    for name in spec.env:
+        monkeypatch.delenv(name, raising=False)
+    assert spec.available() is False
+    assert spec.missing_hint
+
+
+# --- the manifests -------------------------------------------------------
+
+
+@pytest.mark.parametrize("server", SERVERS)
+def test_manifest_loads_and_declares_its_provenance(server: str) -> None:
+    table = manifest(server)
+    assert table.source in {"measured", "documented"}
+    assert table.recorded and table.reference
+    assert table.target_fields, "without target fields a prompt cannot name the blast radius"
+
+
+@pytest.mark.parametrize("server", SERVERS)
+def test_every_before_read_exists_and_is_a_read(server: str) -> None:
+    """A preflight that calls a write to find out about a write is a bug."""
+    table = manifest(server)
+    for mutating, before in table.before.items():
+        assert mutating in table.tools, f"{server}: {mutating} is not in the manifest"
+        assert before in table.tools, f"{server}: before-read {before} is not in the manifest"
+        assert table.tools[before] is Sensitivity.READ, f"{server}: {before} is not a read"
+
+
+@pytest.mark.parametrize("server", SERVERS)
+def test_manifest_sensitivities_are_the_four_known_levels(server: str) -> None:
+    raw = tomllib.loads((MANIFESTS / f"{server}.toml").read_text(encoding="utf-8"))
+    for name, level in dict(raw.get("tools", {})).items():
+        assert level in {s.value for s in Sensitivity}, f"{server}.{name} = {level!r}"
+
+
+@pytest.mark.parametrize("server", SERVERS)
+def test_classify_never_returns_less_than_the_manifest_says(server: str) -> None:
+    """The sweep. Every rule in `classify` escalates; none may relax."""
+    order = [
+        Sensitivity.READ,
+        Sensitivity.SENSITIVE_READ,
+        Sensitivity.MUTATE,
+        Sensitivity.PRIVILEGED,
+    ]
+    for tool, listed in manifest(server).tools.items():
+        got = classify(server, tool)
+        assert order.index(got) >= order.index(listed), f"{server}.{tool} relaxed to {got}"
+
+
+# --- the four levels, over real tool names -------------------------------
+
+
+@pytest.mark.parametrize(
+    ("server", "tool", "expected"),
+    [
+        # plain reads stay plain
+        ("github", "list_issues", Sensitivity.READ),
+        ("grafana", "query_prometheus", Sensitivity.READ),
+        ("datadog", "search_datadog_logs", Sensitivity.READ),
+        ("newrelic", "list_recent_issues", Sensitivity.READ),
+        ("atlassian", "getJiraIssue", Sensitivity.READ),
+        # a read that hands back credential material
+        ("github", "get_secret_scanning_alert", Sensitivity.SENSITIVE_READ),
+        ("datadog", "datadog_secrets_scan", Sensitivity.SENSITIVE_READ),
+        # caller-supplied queries against a data plane
+        ("newrelic", "execute_nrql_query", Sensitivity.SENSITIVE_READ),
+        ("grafana", "query_sql", Sensitivity.SENSITIVE_READ),
+        ("datadog", "ddsql_run_query", Sensitivity.SENSITIVE_READ),
+        # ordinary writes
+        ("github", "add_issue_comment", Sensitivity.MUTATE),
+        ("github", "merge_pull_request", Sensitivity.MUTATE),
+        ("atlassian", "createJiraIssue", Sensitivity.MUTATE),
+        ("grafana", "update_dashboard", Sensitivity.MUTATE),
+        # rewriting who may do what
+        ("github", "create_repository_ruleset", Sensitivity.PRIVILEGED),
+        # deleting something stateful
+        ("github", "delete_repository", Sensitivity.PRIVILEGED),
+        ("github", "delete_file", Sensitivity.PRIVILEGED),
+        # arbitrary execution, whatever the vendor calls it
+        ("datadog", "execute_code", Sensitivity.PRIVILEGED),
+        (
+            "datadog",
+            "datadog_remote_action_restricted_shell_run_command",
+            Sensitivity.PRIVILEGED,
+        ),
+        ("snowflake", "system_execute_sql", Sensitivity.PRIVILEGED),
+    ],
+)
+def test_the_scope_table(server: str, tool: str, expected: Sensitivity) -> None:
+    assert classify(server, tool) is expected
+
+
+def test_a_challenge_stays_worth_reading() -> None:
+    """Deleting a repository is privileged; deleting an annotation is not.
+
+    The AWS work established why: a challenge that fires on everything teaches
+    people to type through it. `delete_annotation` and `delete_repository` are
+    both deletes, and only one of them destroys state anyone will miss.
+    """
+    assert classify("grafana", "delete_annotation") is Sensitivity.MUTATE
+    assert classify("grafana", "delete_snapshot") is Sensitivity.MUTATE
+    assert classify("github", "delete_repository") is Sensitivity.PRIVILEGED
+
+
+# --- failing closed, and the drift alarm ---------------------------------
+
+
+def test_a_tool_the_manifest_has_never_seen_is_privileged() -> None:
+    assert classify("github", "nuke_everything_v2") is Sensitivity.PRIVILEGED
+    assert "manifest" in why_unknown("github", "nuke_everything_v2")
+
+
+def test_a_server_altus_does_not_ship_is_privileged() -> None:
+    assert classify("some-random-server", "read_thing") is Sensitivity.PRIVILEGED
+    assert "not a server Altus ships" in why_unknown("some-random-server", "read_thing")
+
+
+def test_a_known_tool_has_no_unknown_reason() -> None:
+    assert why_unknown("github", "list_issues") == ""
+
+
+@pytest.mark.parametrize(
+    ("scope", "expected"),
+    [
+        ("vector-search/main/default", Sensitivity.READ),
+        ("genie/01ef", Sensitivity.READ),
+        ("functions/main/default", Sensitivity.PRIVILEGED),
+        ("", Sensitivity.PRIVILEGED),
+    ],
+)
+def test_databricks_capability_comes_from_the_endpoint(scope: str, expected: Sensitivity) -> None:
+    """Names are the customer's there, so the URL is the only honest signal.
+
+    Failing every unnamed tool closed would demand a typed challenge to run a
+    vector search, which is the challenge-fatigue failure again.
+    """
+    assert classify("databricks", "some_index_the_customer_named", scope=scope) is expected
+
+
+def test_every_databricks_scope_explains_itself() -> None:
+    for level, why in DATABRICKS_SCOPES.values():
+        assert isinstance(level, Sensitivity)
+        assert why and why[0].islower()
+
+
+# --- annotations are a ceiling, never a floor ----------------------------
+
+
+def test_a_server_calling_a_read_a_write_escalates_it() -> None:
+    info = ToolInfo("list_issues", read_only_hint=False)
+    assert classify("github", "list_issues", info) is Sensitivity.MUTATE
+
+
+def test_destructive_hint_escalates_too() -> None:
+    info = ToolInfo("list_issues", destructive_hint=True)
+    assert classify("github", "list_issues", info) is Sensitivity.MUTATE
+
+
+def test_a_server_calling_a_write_a_read_changes_nothing() -> None:
+    """The half of the signal we must not take: a remote process does not get
+    to talk its way down to a read."""
+    info = ToolInfo("delete_repository", read_only_hint=True, destructive_hint=False)
+    assert classify("github", "delete_repository", info) is Sensitivity.PRIVILEGED
+    info = ToolInfo("add_issue_comment", read_only_hint=True)
+    assert classify("github", "add_issue_comment", info) is Sensitivity.MUTATE
+
+
+def test_drift_reports_both_kinds() -> None:
+    reported = drift(
+        "github",
+        [
+            ToolInfo("list_issues"),
+            ToolInfo("brand_new_tool"),
+            ToolInfo("get_me", read_only_hint=False),
+        ],
+    )
+    assert len(reported) == 2
+    assert any("brand_new_tool" in line and "not in the manifest" in line for line in reported)
+    assert any("get_me" in line and "declares it a write" in line for line in reported)
+
+
+def test_no_drift_when_the_server_agrees() -> None:
+    assert drift("github", [ToolInfo("list_issues", read_only_hint=True)]) == []
+
+
+# --- targets -------------------------------------------------------------
+
+
+def test_target_names_the_blast_radius() -> None:
+    target = target_for("github", {"owner": "acme", "repo": "billing"})
+    assert target.cloud == "github"
+    assert target.render() == "github: acme · billing"
+
+
+def test_a_production_target_is_protected_with_no_new_config() -> None:
+    """`ProtectedSettings` ships `*prod*`, and it now covers MCP for free."""
+    rules = ProtectionRules.build(["*prod*"], [], "confirm")
+    hit = target_for("snowflake", {"database": "PROD_ANALYTICS", "schema": "public"})
+    miss = target_for("snowflake", {"database": "dev_analytics", "schema": "public"})
+    assert rules.matches(hit)
+    assert not rules.matches(miss)
+
+
+def test_missing_target_arguments_do_not_crash() -> None:
+    assert target_for("github", {}).render() == "github"
+
+
+# --- credentials and transport -------------------------------------------
+
+
+def test_the_environment_beats_the_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
+    import keyring
+
+    spec = server_spec("github")
+    assert spec is not None
+    keyring.set_password("altus", "mcp:github:GITHUB_PERSONAL_ACCESS_TOKEN", "stored")
+    monkeypatch.setenv("GITHUB_PERSONAL_ACCESS_TOKEN", "exported")
+    assert credential(spec, "GITHUB_PERSONAL_ACCESS_TOKEN") == "exported"
+    monkeypatch.delenv("GITHUB_PERSONAL_ACCESS_TOKEN")
+    assert credential(spec, "GITHUB_PERSONAL_ACCESS_TOKEN") == "stored"
+
+
+def test_a_broken_keyring_is_not_fatal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A locked or missing backend must degrade to "no credential", not crash."""
+    import keyring
+
+    def boom(_service: str, _user: str) -> str:
+        raise RuntimeError("no backend")
+
+    monkeypatch.setattr(keyring, "get_password", boom)
+    spec = server_spec("github")
+    assert spec is not None
+    assert credential(spec, "GITHUB_PERSONAL_ACCESS_TOKEN") is None
+
+
+def test_datadog_needs_both_of_its_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One of a two-header pair is not partial credentials, it is none."""
+    spec = server_spec("datadog")
+    assert spec is not None
+    monkeypatch.setenv("DD_API_KEY", "k")
+    monkeypatch.delenv("DD_APPLICATION_KEY", raising=False)
+    assert missing_credentials(spec) == ("DD_APPLICATION_KEY",)
+    monkeypatch.setenv("DD_APPLICATION_KEY", "a")
+    assert missing_credentials(spec) == ()
+
+
+async def test_a_call_without_credentials_never_opens_a_connection() -> None:
+    provider = McpProvider()
+    with pytest.raises(McpError, match="no credentials"):
+        await provider.call("github", "list_issues", {})
+
+
+async def test_an_unshipped_server_is_refused_before_anything_is_dialled() -> None:
+    provider = McpProvider()
+    with pytest.raises(McpError, match="not a server Altus ships"):
+        await provider.call("evil-corp", "do_thing", {})
+
+
+def test_an_unfilled_endpoint_is_a_configuration_error_not_a_request() -> None:
+    """Snowflake's URL contains the customer's own account. Sending a request
+    at a URL still containing `{account}` would just be a confusing 404."""
+    provider = McpProvider()
+    spec = server_spec("snowflake")
+    assert spec is not None
+    with pytest.raises(McpError, match="account"):
+        provider.url_for(spec)
+    provider.urls["snowflake"] = "https://acme.snowflakecomputing.com/api/v2/mcp"
+    assert provider.url_for(spec).endswith("/api/v2/mcp")
+
+
+def test_the_databricks_scope_lands_in_the_url() -> None:
+    provider = McpProvider(scopes={"databricks": "genie/01ef"})
+    spec = server_spec("databricks")
+    assert spec is not None
+    provider.urls["databricks"] = "https://acme.databricks.com/api/2.0/mcp/{scope}"
+    assert provider.url_for(spec).endswith("/api/2.0/mcp/genie/01ef")
+
+
+def test_a_stdio_server_is_handed_only_what_it_needs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Passing a subprocess os.environ would hand it every other credential
+    on the machine --- the AWS keys, the Anthropic key, all of it."""
+    monkeypatch.setenv("GRAFANA_API_KEY", "g")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-leak")
+    spec = server_spec("grafana")
+    assert spec is not None
+    params = _stdio_params(spec, credentials(spec))
+    assert params.env is not None
+    assert set(params.env) == {"PATH", "GRAFANA_API_KEY"}
+
+
+def test_annotations_are_read_off_the_real_sdk_shape() -> None:
+    """The SDK names these read_only_hint; the wire format says readOnlyHint.
+
+    Reading only one spelling means every annotation arrives as None, which
+    would silently disable the escalation rule rather than fail visibly.
+    """
+    from mcp.types import Tool, ToolAnnotations
+
+    tool = Tool(
+        name="delete_repository",
+        description="Delete a repository",
+        inputSchema={"type": "object"},
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True),
+    )
+    info = ToolInfo.from_mcp(tool)
+    assert info.name == "delete_repository"
+    assert info.read_only_hint is False
+    assert info.destructive_hint is True
+    assert info.server_says_write
+
+
+def test_a_tool_without_annotations_says_nothing_either_way() -> None:
+    from mcp.types import Tool
+
+    info = ToolInfo.from_mcp(Tool(name="list_issues", inputSchema={"type": "object"}))
+    assert info.read_only_hint is None
+    assert info.server_says_write is False
+
+
+# --- the tool layer ------------------------------------------------------
+
+
+class FakeMcp:
+    """A provider that records everything, and never opens a socket.
+
+    Shaped like `test_azure.py`'s FakeAzure: the point of it is that `calls`
+    is the evidence for the deny sweep.
+    """
+
+    def __init__(self, tools: dict[str, list[ToolInfo]] | None = None) -> None:
+        self.scopes: dict[str, str] = {}
+        self.urls: dict[str, str] = {}
+        self.calls: list[tuple[str, str, dict[str, Any]]] = []
+        self.results: dict[str, str] = {}
+        self.tools_by_server: dict[str, list[ToolInfo]] = tools or {
+            "github": [
+                ToolInfo("list_issues", "List issues"),
+                ToolInfo("issue_read", "Read one issue"),
+                ToolInfo("get_file_contents", "Read a file"),
+                ToolInfo("add_issue_comment", "Comment on an issue"),
+                ToolInfo("issue_write", "Create or edit an issue"),
+                ToolInfo("delete_repository", "Delete a repository", destructive_hint=True),
+                ToolInfo("brand_new_tool", "Shipped after the manifest was written"),
+            ]
+        }
+
+    async def tools(self, server: str) -> tuple[ToolInfo, ...]:
+        return tuple(self.tools_by_server.get(server, ()))
+
+    async def tool(self, server: str, name: str) -> ToolInfo | None:
+        return next((t for t in await self.tools(server) if t.name == name), None)
+
+    async def call(self, server: str, tool: str, args: dict[str, Any]) -> str:
+        self.calls.append((server, tool, args))
+        return self.results.get(tool, f"{tool} ok")
+
+
+def make_ctx(
+    provider: FakeMcp,
+    *,
+    policy: Any = None,
+    servers: tuple[str, ...] = ("github",),
+    **settings: Any,
+) -> ToolContext:
+    from altus.config.models import McpSettings
+    from altus.tools.approval import AllowAll
+
+    return ToolContext(
+        workspace=Workspace(Path.cwd()),
+        approvals=policy or AllowAll(),
+        cloud=CloudContext(
+            mcp=provider,
+            mcp_settings=McpSettings(servers=list(servers), **settings),
+            protection=ProtectionRules.build(["*prod*"], [], "confirm"),
+        ),
+    )
+
+
+def test_four_tools_however_many_servers_connect() -> None:
+    """Seven servers publish well over two hundred tools between them. The
+    whole point of the meta-tool shape is that none of that is in context."""
+    from altus.config.models import McpSettings
+    from altus.tools.mcp import mcp_tools as build
+
+    assert [t.name for t in build(McpSettings())] == [
+        "mcp_servers",
+        "mcp_tools",
+        "mcp_call",
+        "mcp_do",
+    ]
+
+
+def test_switches_remove_exactly_their_tools() -> None:
+    from altus.config.models import McpSettings
+    from altus.tools.mcp import mcp_tools as build
+
+    assert [t.name for t in build(McpSettings(allow_writes=False))] == [
+        "mcp_servers",
+        "mcp_tools",
+        "mcp_call",
+    ]
+    assert build(McpSettings(enabled=False)) == []
+
+
+def test_a_read_only_registry_carries_no_mcp_do() -> None:
+    from altus.config.models import McpSettings
+    from altus.tools.registry import default_registry
+
+    registry = default_registry(
+        writes=False,
+        kubernetes=False,
+        aws=False,
+        azure=False,
+        gcp=False,
+        mcp=True,
+        mcp_settings=McpSettings(),
+    )
+    assert "mcp_call" in registry
+    assert "mcp_do" not in registry
+
+
+async def test_mcp_call_refuses_a_write_without_contacting_the_server() -> None:
+    from altus.tools.mcp.reads import McpCallTool
+
+    provider = FakeMcp()
+    out = await McpCallTool().run(
+        {"server": "github", "tool": "add_issue_comment", "arguments": {"body": "hi"}},
+        make_ctx(provider),
+    )
+    assert out.is_error
+    assert "mcp_do" in out.content
+    assert provider.calls == []
+
+
+async def test_mcp_do_sends_a_read_back_to_mcp_call() -> None:
+    from altus.tools.mcp.mutations import McpDoTool
+
+    provider = FakeMcp()
+    out = await McpDoTool().run({"server": "github", "tool": "list_issues"}, make_ctx(provider))
+    assert out.is_error
+    assert "mcp_call" in out.content
+    assert provider.calls == []
+
+
+async def test_the_deny_sweep() -> None:
+    """Refused, and the only thing that reached the server was the before-read.
+
+    This is the assertion that caught most of the bugs in all four clouds.
+    """
+    from altus.tools.approval import Decision, RecordingPolicy
+    from altus.tools.mcp.mutations import McpDoTool
+
+    policy = RecordingPolicy(decision=Decision.DENY)
+    provider = FakeMcp()
+    out = await McpDoTool().run(
+        {"server": "github", "tool": "issue_write", "arguments": {"owner": "acme", "repo": "b"}},
+        make_ctx(provider, policy=policy),
+    )
+    assert out.denied
+    assert [tool for _s, tool, _a in provider.calls] == ["issue_read"]
+
+
+async def test_the_prompt_never_claims_a_preview() -> None:
+    from altus.tools.approval import RecordingPolicy
+    from altus.tools.mcp.mutations import McpDoTool
+
+    policy = RecordingPolicy()
+    provider = FakeMcp()
+    provider.results["issue_read"] = "title: Billing is down\nstate: open"
+    await McpDoTool().run(
+        {
+            "server": "github",
+            "tool": "issue_write",
+            "arguments": {"owner": "acme", "repo": "billing"},
+        },
+        make_ctx(provider, policy=policy),
+    )
+    request = policy.seen[0]
+    assert "no preview exists" in request.dry_run
+    assert "validated" not in request.dry_run
+    assert "Billing is down" in request.dry_run
+    assert request.target == "github: acme · billing"
+
+
+async def test_a_tool_the_manifest_never_saw_says_so_in_the_prompt() -> None:
+    from altus.tools.approval import RecordingPolicy
+    from altus.tools.mcp.mutations import McpDoTool
+
+    policy = RecordingPolicy()
+    provider = FakeMcp()
+    await McpDoTool().run(
+        {"server": "github", "tool": "brand_new_tool", "arguments": {"owner": "acme"}},
+        make_ctx(provider, policy=policy),
+    )
+    request = policy.seen[0]
+    assert request.sensitivity is Sensitivity.PRIVILEGED
+    assert request.needs_challenge
+    assert not request.may_grant_always
+    assert "not in Altus's manifest" in request.dry_run
+
+
+async def test_a_protected_target_demands_a_typed_confirmation() -> None:
+    from altus.tools.approval import RecordingPolicy
+    from altus.tools.mcp.mutations import McpDoTool
+
+    policy = RecordingPolicy()
+    provider = FakeMcp()
+    await McpDoTool().run(
+        {
+            "server": "github",
+            "tool": "add_issue_comment",
+            "arguments": {"owner": "acme", "repo": "prod-billing"},
+        },
+        make_ctx(provider, policy=policy),
+    )
+    assert policy.seen[0].protected
+    assert policy.seen[0].needs_challenge
+
+
+async def test_writes_disabled_refuses_before_anything_is_resolved() -> None:
+    from altus.tools.mcp.mutations import McpDoTool
+
+    provider = FakeMcp()
+    out = await McpDoTool().run(
+        {"server": "github", "tool": "add_issue_comment"},
+        make_ctx(provider, allow_writes=False),
+    )
+    assert out.is_error
+    assert "allow_writes" in out.content
+    assert provider.calls == []
+
+
+async def test_a_json_result_is_redacted_structurally() -> None:
+    """The name/value shape --- which is what these servers actually return."""
+    from altus.tools.mcp.reads import McpCallTool
+
+    provider = FakeMcp()
+    provider.results["list_issues"] = json.dumps(
+        [{"name": "API_TOKEN", "value": "sk-live-abcdef"}, {"name": "REGION", "value": "eu-west-1"}]
+    )
+    out = await McpCallTool().run({"server": "github", "tool": "list_issues"}, make_ctx(provider))
+    assert "sk-live-abcdef" not in out.content
+    assert "redacted" in out.content
+    assert "eu-west-1" in out.content, "redaction must not blank things that are not secret"
+
+
+async def test_a_text_result_falls_through_to_the_text_scrubber() -> None:
+    """`redact` does nothing to a string. Running only the structured pass over
+    free text reads as working and redacts nothing at all."""
+    from altus.tools.mcp.reads import McpCallTool
+
+    provider = FakeMcp()
+    provider.results["list_issues"] = "PATH=/usr/bin\nDB_PASSWORD=hunter2\nstate: open"
+    out = await McpCallTool().run({"server": "github", "tool": "list_issues"}, make_ctx(provider))
+    assert "hunter2" not in out.content
+    assert "/usr/bin" in out.content
+
+
+async def test_rows_are_capped() -> None:
+    """Snowflake and Databricks answer with rows, and every row reaches the
+    model provider."""
+    from altus.tools.mcp.reads import McpCallTool
+
+    provider = FakeMcp()
+    provider.results["list_issues"] = "\n".join(f"row {i}" for i in range(500))
+    out = await McpCallTool().run(
+        {"server": "github", "tool": "list_issues"}, make_ctx(provider, max_rows=10)
+    )
+    assert "showing 10 of 500 rows" in out.content
+    assert "row 11" not in out.content
+
+
+async def test_mcp_tools_reports_sensitivity_for_every_tool() -> None:
+    from altus.tools.mcp.reads import McpToolsTool
+
+    out = await McpToolsTool().run({}, make_ctx(FakeMcp()))
+    assert out.visual is not None
+    levels = {row[2] for row in out.visual.rows}
+    assert levels == {"read", "mutate", "privileged"}
+
+
+async def test_mcp_servers_says_where_results_go() -> None:
+    from altus.tools.mcp.reads import McpServersTool
+
+    out = await McpServersTool().run({}, make_ctx(FakeMcp()))
+    assert "leaves this machine" in out.content
+    assert "documented" in out.content
+
+
+async def test_mcp_servers_check_reports_drift() -> None:
+    from altus.tools.mcp.reads import McpServersTool
+
+    out = await McpServersTool().run({"check": True}, make_ctx(FakeMcp()))
+    assert "brand_new_tool" in out.content
+    assert "not in the manifest" in out.content
+
+
+async def test_a_server_with_no_credentials_is_not_callable() -> None:
+    from altus.tools.mcp.reads import McpCallTool
+
+    provider = FakeMcp()
+    out = await McpCallTool().run(
+        {"server": "grafana", "tool": "list_datasources"},
+        make_ctx(provider, servers=("github",)),
+    )
+    assert out.is_error
+    assert "not enabled" in out.summary
+    assert provider.calls == []
+
+
+# --- /mcp ----------------------------------------------------------------
+
+
+def test_mcp_is_listed_in_the_command_registry() -> None:
+    from altus.tui.commands.builtin import build_registry
+
+    registry = build_registry()
+    assert "mcp" in registry.commands
+    assert registry.commands["mcp"].handler is not None
+
+
+async def test_the_mcp_command_lists_every_server_and_what_is_missing() -> None:
+    """With no credentials anywhere --- which is what the test harness
+    guarantees --- every server must be reported as absent with the variable
+    to set, rather than silently omitted."""
+    from tests.test_tui import _notices, _send, make_app
+
+    app = make_app()
+    async with app.run_test() as pilot:
+        await _send(pilot, "/mcp")
+        await pilot.app.workers.wait_for_complete()
+        await pilot.pause()
+        rendered = _notices(pilot)
+    for server in SERVERS:
+        assert server in rendered
+    assert "GITHUB_PERSONAL_ACCESS_TOKEN" in rendered
+    assert "no dry-run" in rendered
+
+
+async def test_the_mcp_command_says_when_the_extra_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_tui import _notices, _send, make_app
+
+    app = make_app()
+    async with app.run_test() as pilot:
+        pilot.app.tool_ctx.cloud.mcp = None
+        await _send(pilot, "/mcp")
+        await pilot.app.workers.wait_for_complete()
+        await pilot.pause()
+        assert "uv sync --extra mcp" in _notices(pilot)
+
+
+def test_both_doors_agree_on_what_is_enabled() -> None:
+    """`/mcp` and `mcp_servers` must not answer this differently. The gcloud
+    classifier already taught that lesson once."""
+    from altus.config.models import McpServerSettings, McpSettings
+    from altus.mcp.catalog import enabled_servers as shared
+    from altus.tools.mcp.reads import McpServersTool
+
+    for settings in (
+        McpSettings(),
+        McpSettings(servers=["github", "grafana"]),
+        McpSettings(servers=["github"], github=McpServerSettings(enabled=False)),
+        McpSettings(datadog=McpServerSettings(enabled=True)),
+    ):
+        ctx = ToolContext(
+            workspace=Workspace(Path.cwd()),
+            cloud=CloudContext(mcp=FakeMcp(), mcp_settings=settings),
+        )
+        assert [s.id for s in McpServersTool().enabled_servers(ctx)] == [
+            s.id for s in shared(settings)
+        ]
+
+
+def test_datadog_is_told_it_needs_both_keys() -> None:
+    """One of a two-header pair is not partial credentials, and "or" sends the
+    user off to set one of two things and find it still does not work."""
+    spec = server_spec("datadog")
+    assert spec is not None
+    assert spec.missing_hint == "set DD_API_KEY and DD_APPLICATION_KEY"
+    github = server_spec("github")
+    assert github is not None
+    assert " or " in github.missing_hint
+
+
+def test_the_readme_count_is_the_real_count() -> None:
+    """The README cites 437 shipped manifest entries. A number in
+    documentation that nothing checks is a number that goes stale."""
+    from pathlib import Path as P
+
+    total = sum(len(manifest(server).tools) for server in SERVERS)
+    readme = (P(__file__).parent.parent / "README.md").read_text(encoding="utf-8")
+    assert f"{total} tool" in readme, f"README does not cite the real total, {total}"

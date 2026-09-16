@@ -39,10 +39,14 @@ azure = ["azure-identity>=1.20"]
 gcp = ["google-api-python-client>=2.150", "google-auth>=2.35"]
 all = [
     "kubernetes>=32.0",
+    "mcp>=1.9",
     "textual-image[textual]>=0.14",
     "azure-identity>=1.20",
     "google-api-python-client>=2.150",
     "google-auth>=2.35",
+]
+mcp = [
+    "mcp>=1.9",
 ]
 
 [project.urls]

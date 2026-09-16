@@ -151,7 +151,7 @@ async def _chat_once(
     prof = _override(prof, model=model, provider=provider_name)
 
     workspace = build_workspace(config, extra_roots=extra_roots)
-    registry = default_registry(cloud=config.cloud)
+    registry = default_registry(cloud=config.cloud, mcp_settings=config.mcp)
     # --once is non-interactive by definition: there is nobody to prompt, so
     # file changes fail closed unless the caller passed --yes.
     ctx = build_tool_context(
@@ -450,7 +450,7 @@ def tools_list() -> None:
     """List the tools the model can call, and the workspace they operate in."""
     config = load_config()
     workspace = build_workspace(config)
-    registry = default_registry(cloud=config.cloud)
+    registry = default_registry(cloud=config.cloud, mcp_settings=config.mcp)
     state = "enabled" if config.tools.enabled else "disabled"
     typer.echo(f"workspace: {workspace.root}")
     for extra in workspace.extra_roots:

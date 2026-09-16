@@ -425,6 +425,64 @@ async def cmd_azure(app: AltusApp, args: list[str]) -> CommandResult:
     return CommandResult("\n".join(rows), title="Azure")
 
 
+async def cmd_mcp(app: AltusApp, args: list[str]) -> CommandResult:
+    """What is connected, what it covers, and what is missing.
+
+    `/mcp check` connects to each enabled server and compares its live tool
+    list against Altus's manifest. That is the only way drift becomes visible,
+    and drift is the thing this surface has instead of a corpus: a tool name
+    Altus has never seen classifies privileged, which is safe but is also the
+    signal that a vendor shipped a release.
+    """
+    from altus.mcp.catalog import CATALOG, enabled_servers, why_off
+    from altus.mcp.classify import drift, manifest
+
+    settings = app.config.mcp
+    if not settings.enabled:
+        return CommandResult.warn("MCP is disabled ([mcp] enabled = false).")
+    provider = getattr(app.tool_ctx.cloud, "mcp", None)
+    if provider is None:
+        return CommandResult.warn("The MCP extra is not installed. uv sync --extra mcp")
+
+    # The same predicate the mcp_servers tool uses, so one question cannot get
+    # two answers depending on which door it came through.
+    enabled = [spec.id for spec in enabled_servers(settings)]
+    rows = ["MCP servers:"]
+    for spec in CATALOG:
+        state = "ready" if spec.id in enabled else f"off --- {why_off(spec, settings)}"
+        table = manifest(spec.id)
+        rows.append(f"  {spec.id:<11} {state}")
+        rows.append(f"    {', '.join(spec.products)}")
+        rows.append(f"    {len(table.tools)} tools in Altus's manifest ({table.source})")
+        if spec.notes:
+            rows.append(f"    note: {spec.notes}")
+
+    if args and args[0] == "check":
+        rows.append("")
+        rows.append("Comparing live tool lists against the manifests:")
+        for server in enabled:
+            try:
+                live = await provider.tools(server)
+            except Exception as exc:
+                rows.append(f"  {server}: could not connect --- {exc}")
+                continue
+            found = drift(server, list(live), scope=provider.scopes.get(server, ""))
+            rows.append(f"  {server}: {len(live)} live, {len(found)} disagreeing")
+            rows += [f"    {line}" for line in found[:10]]
+            if len(found) > 10:
+                rows.append(f"    ... and {len(found) - 10} more")
+    elif enabled:
+        rows.append("")
+        rows.append("/mcp check compares each live tool list against the manifest.")
+
+    rows.append("")
+    rows.append(
+        "Writes are " + ("on" if settings.allow_writes else "off") + "; MCP has no dry-run, "
+        "so a write prompt can only show current state, never a preview."
+    )
+    return CommandResult("\n".join(rows))
+
+
 async def cmd_gcp(app: AltusApp, args: list[str]) -> CommandResult:
     """Account, project and protected status --- and switching project.
 
@@ -560,6 +618,7 @@ def build_registry() -> CommandRegistry:
             cmd_azure,
         ),
         Command("gcp", "GCP account, project and identity", "gcp [project <id>]", cmd_gcp),
+        Command("mcp", "MCP servers and their tools", "mcp [check]", cmd_mcp),
         Command("tools", "Tools and installed integrations", "tools", cmd_tools),
         Command(
             "dashboard",

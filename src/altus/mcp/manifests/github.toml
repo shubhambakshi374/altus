@@ -1,0 +1,134 @@
+# github/github-mcp-server, toolsets as published in its README.
+#
+# Entries record what the operation *is*, not how dangerous Altus thinks it is:
+# `delete_repository` is listed as a write and `classify` is what decides it is
+# privileged. Keeping the judgement in one place is what stops the manifest and
+# the classifier drifting apart.
+source = "documented"
+recorded = "2026-09-16"
+reference = "https://github.com/github/github-mcp-server"
+target_fields = ["owner", "repo"]
+
+[tools]
+# context
+get_me = "read"
+get_teams = "read"
+get_team_members = "read"
+
+# actions
+actions_get = "read"
+actions_list = "read"
+get_job_logs = "read"
+actions_run_trigger = "mutate"
+
+# code scanning, dependabot, secret scanning
+get_code_quality_finding = "read"
+get_code_scanning_alert = "read"
+list_code_scanning_alerts = "read"
+get_dependabot_alert = "read"
+list_dependabot_alerts = "read"
+get_secret_scanning_alert = "read"
+
+# repos
+get_commit = "read"
+get_file_contents = "read"
+get_latest_release = "read"
+get_release_by_tag = "read"
+get_tag = "read"
+get_repository_tree = "read"
+list_branches = "read"
+list_commits = "read"
+list_releases = "read"
+list_repository_collaborators = "read"
+list_tags = "read"
+search_code = "read"
+search_commits = "read"
+search_repositories = "read"
+create_branch = "mutate"
+create_or_update_file = "mutate"
+create_repository = "mutate"
+delete_file = "mutate"
+delete_repository = "mutate"
+fork_repository = "mutate"
+push_files = "mutate"
+
+# issues
+get_label = "read"
+issue_read = "read"
+list_issue_fields = "read"
+list_issue_types = "read"
+list_issues = "read"
+list_label = "read"
+search_issues = "read"
+add_issue_comment = "mutate"
+issue_write = "mutate"
+label_write = "mutate"
+sub_issue_write = "mutate"
+update_issue_comment = "mutate"
+
+# pull requests
+list_pull_requests = "read"
+pull_request_read = "read"
+search_pull_requests = "read"
+add_comment_to_pending_review = "mutate"
+add_reply_to_pull_request_comment = "mutate"
+create_pull_request = "mutate"
+merge_pull_request = "mutate"
+pull_request_review_write = "mutate"
+update_pull_request = "mutate"
+update_pull_request_branch = "mutate"
+
+# discussions
+get_discussion = "read"
+get_discussion_comments = "read"
+list_discussion_categories = "read"
+list_discussions = "read"
+discussion_comment_write = "mutate"
+
+# gists
+get_gist = "read"
+list_gists = "read"
+create_gist = "mutate"
+update_gist = "mutate"
+
+# governance --- `create_repository_ruleset` is branch protection, and the
+# classifier escalates it on the name.
+custom_properties_read = "read"
+repository_ruleset_read = "read"
+create_repository_ruleset = "mutate"
+custom_properties_write = "mutate"
+
+# notifications
+get_notification_details = "read"
+list_notifications = "read"
+dismiss_notification = "mutate"
+manage_notification_subscription = "mutate"
+manage_repository_notification_subscription = "mutate"
+mark_all_notifications_read = "mutate"
+
+# orgs, projects, copilot
+search_orgs = "read"
+projects_get = "read"
+projects_list = "read"
+projects_write = "mutate"
+assign_copilot_to_issue = "mutate"
+assign_copilot_to_issue_with_intent = "mutate"
+request_copilot_review = "mutate"
+
+# The read that fetches current state before a write. MCP has no dry-run, so
+# this is the whole of the preflight.
+[before]
+issue_write = "issue_read"
+update_issue_comment = "issue_read"
+sub_issue_write = "issue_read"
+update_pull_request = "pull_request_read"
+merge_pull_request = "pull_request_read"
+update_pull_request_branch = "pull_request_read"
+create_or_update_file = "get_file_contents"
+delete_file = "get_file_contents"
+push_files = "get_file_contents"
+update_gist = "get_gist"
+label_write = "get_label"
+projects_write = "projects_get"
+custom_properties_write = "custom_properties_read"
+create_repository_ruleset = "repository_ruleset_read"

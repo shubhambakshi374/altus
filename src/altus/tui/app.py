@@ -50,7 +50,9 @@ class AltusApp(App[None]):
             profile = profile.model_copy(update={"model": model_override})
         self.profile = profile
         self.workspace = build_workspace(self.config, root=workspace_root, extra_roots=extra_roots)
-        self.registry: ToolRegistry = default_registry(cloud=self.config.cloud)
+        self.registry: ToolRegistry = default_registry(
+            cloud=self.config.cloud, mcp_settings=self.config.mcp
+        )
         self.approvals = SessionApprovals(AllowAll() if auto_approve else InteractiveApproval(self))
         self.tool_ctx: ToolContext = build_tool_context(
             self.config, self.workspace, approvals=self.approvals

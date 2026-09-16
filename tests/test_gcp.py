@@ -542,7 +542,7 @@ def test_the_registry_leaves_gcp_out_when_it_is_not(tmp_path: Any) -> None:
     """The native tools go, the CLI fallback stays --- `gcloud` is a binary on
     PATH, not the Python client, so it is gated by cli_allowlist."""
     registry = default_registry(
-        kubernetes=False, aws=False, azure=False, gcp=False, cloud=CloudSettings()
+        kubernetes=False, aws=False, azure=False, gcp=False, mcp=False, cloud=CloudSettings()
     )
     native = {n for n in registry.names if n.startswith("gcp_")} - {"gcp_cli"}
     assert native == set()
@@ -1210,7 +1210,7 @@ def test_gcloud_can_be_switched_off_without_taking_kubectl(tmp_path: Any) -> Non
     settings = CloudSettings()
     settings.gcp.allow_cli = False
     names = default_registry(
-        kubernetes=False, aws=False, azure=False, gcp=False, cloud=settings
+        kubernetes=False, aws=False, azure=False, gcp=False, mcp=False, cloud=settings
     ).names
     assert "gcp_cli" not in names
     assert "k8s_kubectl" in names

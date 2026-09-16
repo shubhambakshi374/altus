@@ -1,0 +1,30 @@
+# The Snowflake-managed MCP server.
+#
+# There is no fixed tool list to record. A Snowflake MCP server is a database
+# object, and whoever created it chose both the tools and their names; what
+# Snowflake fixes is the set of *types* a tool may have:
+#
+#   CORTEX_ANALYST_MESSAGE        natural language to SQL over a semantic model
+#   CORTEX_SEARCH_SERVICE_QUERY   search over unstructured data
+#   CORTEX_AGENT_RUN              governed orchestration over the two above
+#   SYSTEM_EXECUTE_SQL            SQL execution
+#   GENERIC                       a UDF or stored procedure
+#
+# So this manifest can only carry the type names themselves, for deployments
+# that name their tools after them. Everything else classifies privileged, and
+# `mcp_servers` says why rather than pretending the list is complete.
+#
+# SYSTEM_EXECUTE_SQL takes an optional read-only restriction. Altus does not
+# soften its classification on that basis: the restriction lives in the server
+# object, no client can see whether it was applied, and a tool that runs
+# caller-supplied SQL against a warehouse is arbitrary execution either way.
+source = "documented"
+recorded = "2026-09-16"
+reference = "https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-agents-mcp"
+target_fields = ["database", "schema", "warehouse"]
+
+[tools]
+cortex_analyst_message = "sensitive_read"
+cortex_search_service_query = "sensitive_read"
+cortex_agent_run = "sensitive_read"
+system_execute_sql = "privileged"

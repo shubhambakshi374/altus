@@ -165,12 +165,18 @@ CATALOG: tuple[ServerSpec, ...] = (
         id="newrelic",
         products=("New Relic",),
         summary="Entities, NRQL, alerts, errors and deployment impact",
-        transport=Transport.STDIO,
+        transport=Transport.HTTP,
         auth=Auth.TOKEN,
-        command=("npx", "-y", "@newrelic/mcp-server"),
+        url="https://mcp.newrelic.com/mcp/",
         env=("NEW_RELIC_API_KEY",),
         reference="https://docs.newrelic.com/docs/agentic-ai/mcp/tool-reference/",
-        notes="Every documented tool is a read; there is no write path to gate.",
+        notes=(
+            "Hosted, and US-region by default --- an EU account needs its own regional "
+            "URL under [mcp.newrelic] url. Every documented tool is a read, so there is "
+            "no write path to gate. A few of them (natural_language_to_nrql_query, "
+            "generate_alert_insights_report, analyze_deployment_impact) are reachable "
+            "only over OAuth, not with a User API key."
+        ),
     ),
     ServerSpec(
         id="snowflake",

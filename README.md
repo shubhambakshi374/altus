@@ -422,10 +422,16 @@ url   = "https://acme.cloud.databricks.com/api/2.0/mcp/{scope}"
 scope = "genie/01ef"
 ```
 
-Credentials come from the environment first and the OS keyring second, never
-from `config.toml`; OAuth tokens go to the keyring too. A stdio server is handed
-`PATH` and its own credentials and nothing else — `os.environ` would give a
-third-party binary every other credential on the machine.
+Six of the seven are hosted; only Grafana runs as a local subprocess, and Altus
+never installs it. Credentials come from the environment first and the OS
+keyring second, never from `config.toml`; OAuth tokens go to the keyring too. A
+stdio server is handed `PATH` and its own credentials and nothing else —
+`os.environ` would give a third-party binary every other credential on the
+machine.
+
+**Listing a server's tools needs working credentials.** Every hosted endpoint
+tested rejects the request before `initialize`, so there is no way to enumerate
+one — or to diff it against the manifest — without an account.
 
 **Snowflake and Databricks answer questions with rows**, and every row reaches
 your model provider. Results are redacted and capped at `max_rows` on the way,

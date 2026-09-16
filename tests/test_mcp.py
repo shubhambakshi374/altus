@@ -762,3 +762,64 @@ def test_the_readme_count_is_the_real_count() -> None:
     total = sum(len(manifest(server).tools) for server in SERVERS)
     readme = (P(__file__).parent.parent / "README.md").read_text(encoding="utf-8")
     assert f"{total} tool" in readme, f"README does not cite the real total, {total}"
+
+
+# --- the failure path ----------------------------------------------------
+
+
+def test_explain_digs_the_real_cause_out_of_a_task_group() -> None:
+    """Both transports run inside anyio task groups, so a plain 401 arrives as
+    "unhandled errors in a TaskGroup (1 sub-exception)", which tells nobody
+    anything about a bad token."""
+    from altus.mcp.session import explain
+
+    group = ExceptionGroup("unhandled errors in a TaskGroup", [ValueError("401 Unauthorized")])
+    assert explain(group) == "ValueError: 401 Unauthorized"
+    nested = ExceptionGroup("outer", [ExceptionGroup("inner", [RuntimeError("boom")])])
+    assert explain(nested) == "RuntimeError: boom"
+    assert explain(ValueError("plain")) == "ValueError: plain"
+
+
+def test_a_connection_that_fails_midway_cleans_up_in_its_own_task() -> None:
+    """The regression for the bug that shipped.
+
+    An earlier `_Session` drove __aenter__/__aexit__ by hand. Both transports
+    wrap an anyio task group, and a task group must be exited by the task that
+    entered it --- so when a connection failed *after* opening, cleanup was
+    finalized by the garbage collector in another task and anyio raised
+    "Attempted to exit cancel scope in a different task" on top of the real
+    error, burying it.
+
+    Three details here look odd, and every one of them is why the bug survived
+    review. It needs a transport that opens and *then* fails, because a command
+    that cannot start at all unwinds cleanly --- hence a process that starts,
+    prints something that is not JSON-RPC, and exits. The failure never reaches
+    the caller, so there is nothing to assert on. And it only shows up once the
+    loop shuts down, which pytest-asyncio's loop never does mid-test --- so this
+    runs under its own `asyncio.run`, in its own interpreter, and reads stderr.
+    The in-process version of this test passed against the broken code.
+    """
+    import subprocess
+    import sys
+    import textwrap
+
+    script = textwrap.dedent("""
+        import asyncio, contextlib
+        from mcp import StdioServerParameters
+        from mcp.client.stdio import stdio_client
+        from altus.mcp.session import _open
+
+        async def main():
+            params = StdioServerParameters(command="/bin/echo", args=["not-json"], env={})
+            with contextlib.suppress(BaseException):
+                async with _open(stdio_client(params)):
+                    pass
+
+        asyncio.run(main())
+    """)
+    done = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=90
+    )
+    assert "cancel scope" not in done.stderr, (
+        f"cleanup escaped the task that opened it:\n{done.stderr[-1500:]}"
+    )

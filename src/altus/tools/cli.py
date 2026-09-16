@@ -78,6 +78,13 @@ RESERVED_FLAGS = (
     # its own would be approved against a target it is not going to touch.
     "--subscription",
     "--tenant",
+    # GCP: the same argument again. --impersonate-service-account is the
+    # sharpest of the four, because it changes *who* the command runs as
+    # without changing anything the prompt would otherwise show.
+    "--project",
+    "--account",
+    "--impersonate-service-account",
+    "--configuration",
 )
 
 
@@ -115,6 +122,8 @@ class CliTool(BaseTool):
             return _classify_aws(positional)
         if self.binary == "az":
             return _classify_azure(positional)
+        if self.binary == "gcloud":
+            return _classify_gcloud(positional)
         if any(a == "--raw" for a in args):
             # kubectl --raw reaches any API path with any verb, unclassified.
             return Sensitivity.PRIVILEGED
@@ -164,6 +173,10 @@ class CliTool(BaseTool):
             subscription = getattr(ctx.cloud, "azure_subscription", "") or ""
             if subscription:
                 full = [*argv, "--subscription", subscription]
+        elif self.binary == "gcloud":
+            project = getattr(ctx.cloud, "gcp_project", "") or ""
+            if project:
+                full = [*argv, "--project", project]
 
         sensitivity = self.classify(argv)
         if sensitivity.needs_approval:
@@ -362,6 +375,103 @@ def _classify_azure(positional: list[str]) -> Sensitivity:
     return classify(operation)
 
 
+#: `gcloud <group...> <verb>` mapped onto the discovery collections the API
+#: path talks about, so one command cannot get two different answers depending
+#: on which door it came through. Only the groups people actually reach for:
+#: anything absent fails closed rather than being guessed at.
+GCLOUD_COLLECTIONS: dict[str, str] = {
+    "projects": "cloudresourcemanager.projects",
+    "config": "cloudresourcemanager.projects",
+    "compute instances": "compute.instances",
+    "compute disks": "compute.disks",
+    "compute snapshots": "compute.snapshots",
+    "compute images": "compute.images",
+    "compute networks": "compute.networks",
+    "compute networks subnets": "compute.subnetworks",
+    "compute firewall-rules": "compute.firewalls",
+    "compute addresses": "compute.addresses",
+    "compute forwarding-rules": "compute.forwardingRules",
+    "compute routes": "compute.routes",
+    "compute regions": "compute.regions",
+    "compute zones": "compute.zones",
+    "storage buckets": "storage.buckets",
+    "iam service-accounts": "iam.projects.serviceAccounts",
+    "iam service-accounts keys": "iam.projects.serviceAccounts.keys",
+    "iam roles": "iam.projects.roles",
+    "kms keys": "cloudkms.projects.locations.keyRings.cryptoKeys",
+    "kms keyrings": "cloudkms.projects.locations.keyRings",
+    "secrets": "secretmanager.projects.secrets",
+    "secrets versions": "secretmanager.projects.secrets.versions",
+    "container clusters": "container.projects.locations.clusters",
+    "sql instances": "sqladmin.instances",
+    "pubsub topics": "pubsub.projects.topics",
+    "pubsub subscriptions": "pubsub.projects.subscriptions",
+    "functions": "cloudfunctions.projects.locations.functions",
+    "run services": "run.projects.locations.services",
+    "logging sinks": "logging.projects.sinks",
+    "services": "serviceusage.services",
+}
+
+#: The gcloud verbs that map onto a discovery method name.
+GCLOUD_VERBS: dict[str, str] = {
+    "list": "list",
+    "describe": "get",
+    "get": "get",
+    "create": "insert",
+    "add": "insert",
+    "delete": "delete",
+    "remove": "delete",
+    "update": "patch",
+    "set": "patch",
+    "add-iam-policy-binding": "setIamPolicy",
+    "remove-iam-policy-binding": "setIamPolicy",
+    "set-iam-policy": "setIamPolicy",
+    "get-iam-policy": "getIamPolicy",
+}
+
+#: Commands whose API method is nothing like their name, and which hand back a
+#: live credential --- the gcloud equivalents of `az storage account keys list`.
+GCLOUD_OPERATIONS: dict[tuple[str, str], str] = {
+    ("container clusters", "get-credentials"): "container.projects.locations.clusters.get",
+    ("secrets versions", "access"): "secretmanager.projects.secrets.versions.access",
+    ("iam service-accounts keys", "create"): "iam.projects.serviceAccounts.keys.create",
+}
+
+
+def _classify_gcloud(positional: list[str]) -> Sensitivity:
+    """`gcloud <group...> <verb>` through the API's own classifier.
+
+    An unmapped group is PRIVILEGED. That is what catches `gcloud auth`,
+    `gcloud organizations`, and every command a future release adds --- and it
+    is why the table is a short allowlist rather than an attempt at
+    completeness.
+
+    An unmapped *verb* under a mapped group is deliberately not privileged,
+    the same considered departure the `az` classifier makes. Demanding a typed
+    confirmation for `gcloud compute instances start` would train people to
+    type through the challenge, which is what the AWS measurement showed when
+    all 2,281 Delete* operations came out privileged.
+    """
+    from altus.cloud.gcp import classify
+
+    if len(positional) < 2:
+        return Sensitivity.PRIVILEGED
+    verb = positional[-1]
+
+    # Groups are one to three words, so try the longest prefix first: both
+    # `compute networks` and `compute networks subnets` are real.
+    for depth in range(len(positional) - 1, 0, -1):
+        group = " ".join(positional[:depth])
+        if group not in GCLOUD_COLLECTIONS:
+            continue
+        override = GCLOUD_OPERATIONS.get((group, verb))
+        if override:
+            return classify(override)
+        method = GCLOUD_VERBS.get(verb, verb)
+        return classify(f"{GCLOUD_COLLECTIONS[group]}.{method}")
+    return Sensitivity.PRIVILEGED
+
+
 async def _execute(path: str, argv: list[str], *, timeout_seconds: float) -> tuple[int, str, str]:
     """create_subprocess_exec, never create_subprocess_shell.
 
@@ -446,5 +556,25 @@ class AzureCliTool(CliTool):
     )
 
 
+class GcloudTool(CliTool):
+    name: ClassVar[str] = "gcp_cli"
+    binary: ClassVar[str] = "gcloud"
+    description: ClassVar[str] = (
+        "Run gcloud when — and only when — the gcp_* tools cannot express what "
+        "you need. They are better: gcp_explain gives you the exact method "
+        "contract from a document that ships on disk, output comes back "
+        "structured and redacted, and the approval prompt says what was "
+        "checked. The CLI gives up all three. Say in `reason` why it is "
+        "necessary; the user sees it. --project is supplied by Altus."
+    )
+
+
 def cli_tools() -> list[CliTool]:
-    return [KubectlTool(), HelmTool(), KustomizeTool(), AwsCliTool(), AzureCliTool()]
+    return [
+        KubectlTool(),
+        HelmTool(),
+        KustomizeTool(),
+        AwsCliTool(),
+        AzureCliTool(),
+        GcloudTool(),
+    ]

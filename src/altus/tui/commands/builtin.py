@@ -351,7 +351,7 @@ async def cmd_dashboard(app: AltusApp, args: list[str]) -> CommandResult:
     """Four read-only views of one namespace, on one screen."""
     from altus.tui.screens.dashboard import DashboardScreen
 
-    clouds = {"k8s", "aws", "azure"}
+    clouds = {"k8s", "aws", "azure", "gcp"}
     wanted = (args[0] if args else "").casefold()
     cloud = wanted if wanted in clouds else "k8s"
     rest = args[1:] if wanted in clouds else args
@@ -359,6 +359,7 @@ async def cmd_dashboard(app: AltusApp, args: list[str]) -> CommandResult:
     hints = {
         "aws": "AWS tools are not available in this session.",
         "azure": "Azure tools are not available. Install with: uv sync --extra azure",
+        "gcp": "GCP tools are not available. Install with: uv sync --extra gcp",
         "k8s": "Kubernetes tools are not available. Install with: uv sync --extra k8s",
     }
     if f"{cloud}_topology" not in app.registry:
@@ -422,6 +423,58 @@ async def cmd_azure(app: AltusApp, args: list[str]) -> CommandResult:
             )
     rows.append("\n  /azure sub <id>   ·   list them with the azure_subscriptions tool")
     return CommandResult("\n".join(rows), title="Azure")
+
+
+async def cmd_gcp(app: AltusApp, args: list[str]) -> CommandResult:
+    """Account, project and protected status --- and switching project.
+
+    Switching asks nothing here because it changes no cloud state, but it does
+    change the blast radius of every later call, so it reports what it moved to
+    and whether that project is protected.
+    """
+    from altus.cloud.auth import status
+    from altus.cloud.base import ProtectionRules
+    from altus.cloud.gcp import target_for
+    from altus.config import save_config
+
+    settings = app.config.cloud
+    rules = ProtectionRules.build(
+        settings.protected.patterns, settings.protected.accounts, settings.protected.mode
+    )
+    provider = getattr(app.tool_ctx.cloud, "gcp", None)
+
+    if args and args[0] in {"project", "proj"}:
+        if len(args) < 2:
+            return CommandResult.error("usage: /gcp project <project-id>")
+        chosen = args[1]
+        settings.gcp_project = chosen
+        save_config(app.config)
+        if provider is not None:
+            provider.project = chosen
+            provider.reset()
+        app.tool_ctx.cloud.gcp_project = chosen
+        note = "  ⚠ this project is protected" if rules.matches(target_for(chosen)) else ""
+        return CommandResult(f"GCP project set to {chosen}.{note}")
+
+    current = await asyncio.to_thread(status, "gcp")
+    if not current.authenticated:
+        return CommandResult.warn(f"Not signed in to GCP: {current.detail or current.hint}")
+
+    rows = ["GCP:", f"  {current.source or 'credentials'}  {current.detail}"]
+    if provider is not None:
+        try:
+            identity = await provider.whoami()
+        except Exception as exc:
+            rows.append(f"  could not read identity: {exc}")
+        else:
+            project = settings.gcp_project or identity.get("project", "")
+            protected = bool(project) and rules.matches(target_for(project))
+            rows.append(f"  account   {identity['account'] or '(not named by these credentials)'}")
+            rows.append(
+                f"  project   {project or '(none selected)'}{'  ⚠ protected' if protected else ''}"
+            )
+    rows.append("\n  /gcp project <id>   ·   list them with the gcp_projects tool")
+    return CommandResult("\n".join(rows), title="GCP")
 
 
 async def cmd_graphics(app: AltusApp, args: list[str]) -> CommandResult:
@@ -506,11 +559,12 @@ def build_registry() -> CommandRegistry:
             "azure [sub <id>]",
             cmd_azure,
         ),
+        Command("gcp", "GCP account, project and identity", "gcp [project <id>]", cmd_gcp),
         Command("tools", "Tools and installed integrations", "tools", cmd_tools),
         Command(
             "dashboard",
             "Several read-only views on one screen",
-            "dashboard [aws | azure | k8s] [<scope>]",
+            "dashboard [aws | azure | gcp | k8s] [<scope>]",
             cmd_dashboard,
         ),
         Command(

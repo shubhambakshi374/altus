@@ -79,6 +79,7 @@ def default_registry(
     kubernetes: bool | None = None,
     aws: bool | None = None,
     azure: bool | None = None,
+    gcp: bool | None = None,
     cloud: Any = None,
 ) -> ToolRegistry:
     """The tool set for a session.
@@ -91,8 +92,8 @@ def default_registry(
 
     ``cloud`` is a ``CloudSettings``; None means every class is on.
 
-    ``kubernetes``, ``aws`` and ``azure`` default to autodetection from what is
-    installed. Pass False for any of them to build a registry without it ---
+    ``kubernetes``, ``aws``, ``azure`` and ``gcp`` default to autodetection from
+    what is installed. Pass False for any of them to build a registry without it ---
     which is what a test wanting only the filesystem tools should do.
     """
     tools: list[Tool] = [ReadFileTool(), ListDirTool(), GlobTool(), GrepTool()]
@@ -130,6 +131,16 @@ def default_registry(
         from altus.tools.azure import azure_tools
 
         tools += list(azure_tools(getattr(cloud, "azure", None)))
+
+    if gcp is None:
+        from altus.cloud.base import integration
+
+        gcp_entry = integration("gcp")
+        gcp = bool(gcp_entry and gcp_entry.available)
+    if gcp:
+        from altus.tools.gcp import gcp_tools
+
+        tools += list(gcp_tools(getattr(cloud, "gcp", None)))
 
     if _cli_enabled(cloud):
         from altus.tools.cli import cli_tools
@@ -170,4 +181,6 @@ def _cli_blocked(cloud: Any) -> set[str]:
     blocked: set[str] = set()
     if not getattr(getattr(cloud, "azure", None), "allow_cli", True):
         blocked.add("az")
+    if not getattr(getattr(cloud, "gcp", None), "allow_cli", True):
+        blocked.add("gcloud")
     return blocked

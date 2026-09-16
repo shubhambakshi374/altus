@@ -61,12 +61,24 @@ SCOPE_NAMES: dict[str, str] = {
     "k8s": "namespace",
     "aws": "region",
     "azure": "subscription",
+    "gcp": "project",
 }
+
+GCP_PANELS: tuple[tuple[str, str, dict[str, Any]], ...] = (
+    ("network", "gcp_topology", {}),
+    ("inventory", "gcp_inventory", {}),
+    # GCP has no cost API, so this panel is budgets unless a BigQuery billing
+    # export is configured. Free either way, so it can sit on a screen that
+    # refreshes.
+    ("spend", "gcp_cost", {}),
+    ("identity", "gcp_whoami", {}),
+)
 
 PANELS_BY_CLOUD: dict[str, tuple[tuple[str, str, dict[str, Any]], ...]] = {
     "k8s": K8S_PANELS,
     "aws": AWS_PANELS,
     "azure": AZURE_PANELS,
+    "gcp": GCP_PANELS,
 }
 
 #: Kept for callers that predate the AWS panels.
@@ -161,6 +173,9 @@ class DashboardScreen(Screen[None]):
         if self.cloud == "azure":
             where = getattr(context, "azure_subscription", None) or "no subscription selected"
             return f"Azure · {where}"
+        if self.cloud == "gcp":
+            where = getattr(context, "gcp_project", None) or "no project selected"
+            return f"GCP · {where}"
         where = getattr(context, "kube_context", None) or "current context"
         return f"{where} · namespace {self.namespace}"
 

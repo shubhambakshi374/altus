@@ -27,6 +27,7 @@ READERS: dict[str, str] = {
     "k8s_get": "Kubernetes",
     "aws_call": "AWS",
     "azure_get": "Azure",
+    "gcp_call": "GCP",
 }
 
 #: Which read answers for an AWS node kind. AWS has no single "get this ARN"
@@ -54,6 +55,17 @@ AZURE_READERS: dict[str, tuple[str, str]] = {
     "NetworkInterface": ("Microsoft.Network", "networkInterfaces"),
     "NetworkSecurityGroup": ("Microsoft.Network", "networkSecurityGroups"),
     "PublicIP": ("Microsoft.Network", "publicIPAddresses"),
+}
+
+
+#: Which method reads an item behind a GCP node kind. GCP names a resource by
+#: project plus zone or region, and the scope segment carries whichever applies.
+GCP_READERS: dict[str, tuple[str, str]] = {
+    "Instance": ("compute.instances.list", "zone"),
+    "Network": ("compute.networks.list", ""),
+    "Subnetwork": ("compute.subnetworks.list", "region"),
+    "Firewall": ("compute.firewalls.list", ""),
+    "ForwardingRule": ("compute.forwardingRules.list", "region"),
 }
 
 
@@ -115,10 +127,18 @@ class NodeDetail(ModalScreen[None]):
         body.update(outcome.content or "(empty)")
 
     def _args(self, parts: tuple[str, str, str]) -> dict[str, str]:
-        """The identity is Kind/scope/name in all three clouds; only the
+        """The identity is Kind/scope/name in all four clouds; only the
         parameter names differ, and the scope means namespace in Kubernetes,
-        region in AWS and resource group in Azure."""
+        region in AWS, resource group in Azure and a zone or region in GCP."""
         kind, scope, name = parts
+        if self.reader == "gcp_call":
+            method, scope_name = GCP_READERS.get(kind, ("compute.instances.list", "zone"))
+            args = {"method": method}
+            # `global` is not a zone or a region --- sending it as one is a 400,
+            # and the list call answers project-wide without it.
+            if scope_name and scope and scope != "global":
+                args["params"] = {scope_name: scope}  # type: ignore[assignment]
+            return args
         if self.reader == "azure_get":
             namespace, resource_type = AZURE_READERS.get(kind, ("Microsoft.Resources", "resources"))
             args = {"namespace": namespace, "type": resource_type}

@@ -4,10 +4,11 @@ A terminal coding and DevOps harness with bring-your-own-key support for eight
 LLM providers — and, ahead of it, a workflow designer that turns the harness
 into a software factory.
 
-> **Status: Phase 2d.** Streaming chat across all eight providers; filesystem
-> tools behind a diff-first approval gate; and three clouds --- **Kubernetes**,
-> **AWS** and **Azure** --- with reads that draw you a picture and changes
-> gated on whatever preview that cloud actually offers. GCP lands in 2e.
+> **Status: Phase 2 complete.** Streaming chat across all eight providers;
+> filesystem tools behind a diff-first approval gate; and four clouds ---
+> **Kubernetes**, **AWS**, **Azure** and **Google Cloud** --- with reads that
+> draw you a picture and changes gated on whatever preview that cloud actually
+> offers. Next is the workflow designer.
 
 ## Install
 
@@ -181,7 +182,8 @@ for the command you are writing.
 | `/kube` · `/kube use <ctx>` · `/kube add <path>` | Kubernetes contexts |
 | `/aws` · `/aws region <name>` · `/aws profile <name>` | AWS identity, account and region |
 | `/azure` · `/azure sub <id>` | Azure tenant, subscription and identity |
-| `/dashboard [aws \| azure \| k8s] [<scope>]` | Several read-only views on one screen |
+| `/gcp` · `/gcp project <id>` | GCP account, project and identity |
+| `/dashboard [aws \| azure \| gcp \| k8s] [<scope>]` | Several read-only views on one screen |
 | `/graphics [auto \| image \| cells \| off]` | How visuals are drawn, and why |
 | `/tools` | Tools, installed integrations, standing approvals |
 | `/new` | Start a fresh session |
@@ -281,6 +283,57 @@ allow_cli         = true   # the `az` fallback
 One credential commonly sees many subscriptions. Altus acts in exactly one, so
 the target named in a prompt is the one that gets touched — switch it with
 `/azure sub <id>`, and widen a Resource Graph query explicitly when you mean to.
+
+## Google Cloud
+
+Google ships its API contracts **on disk** — 600 discovery documents inside the
+client library, covering 335 APIs — so Altus resolves a method's exact
+parameters, its HTTP verb and whether it supports a dry run without a single
+network call:
+
+```
+> what's running in this project, what can reach it, and what are we near the limit on
+```
+
+`gcp_assets` searches every resource at once through Cloud Asset Inventory;
+`gcp_inventory` and `gcp_topology` build on it and fall back to listing services
+one by one when that API is off — saying which, because the two do not see the
+same things. `gcp_quotas` plots real usage against each ceiling.
+
+Classification **parses** rather than guesses. Each method's document states its
+HTTP verb, and of 10,987 GET methods exactly five have a write-shaped name —
+listed by hand, because five is small enough to be exact. `setIamPolicy` leads
+the precedence on every service: it is how a bucket becomes world-readable and
+how anyone grants themselves owner.
+
+**Reads run freely. Everything else asks** — and here the prompt has the least
+to offer of the four clouds, so it says so:
+
+| | |
+|---|---|
+| `validateOnly` | Only 1.9% of methods support it — measured, not estimated |
+| deletion protection | Read from the resource. A refusal, not a warning |
+| liens | Block deleting a project. Also a refusal |
+| `testIamPermissions` | "May I" — the most available of the four preflights |
+
+A method with no dry run produces *"no preview exists: this method cannot be
+validated without running it, and 98% of Google's methods cannot."* Never a
+claim that something was checked when it was not.
+
+```toml
+[cloud.gcp]
+allow_writes         = true
+allow_iam_writes     = true   # setIamPolicy, service-account keys, KMS
+allow_delete         = true
+allow_cli            = true   # the `gcloud` fallback
+billing_export_table = ""     # see below
+```
+
+**GCP has no cost API.** Cloud Billing exposes account metadata and SKU pricing
+and not a cent of actual spend — that lives only in a BigQuery export you
+configure yourself. Point `billing_export_table` at it and `gcp_cost` charts it;
+leave it empty and the tool says exactly that and lists your budgets instead. It
+never returns a number it did not get.
 
 ## Kubernetes
 
@@ -652,7 +705,7 @@ tests/         mirrors it; tests/__snapshots__ holds the TUI SVGs
 - **Local models.** ✅ Ollama, LM Studio, vLLM, llama.cpp — discovered, capability-checked, no key.
 - **Phase 2c — AWS.** ✅ Inventory, VPC topology, cost, quotas, and any operation behind a gate that says what it could check.
 - **Phase 2d — Azure.** ✅ Resource Graph inventory and topology, cost, quotas, and changes behind a gate that runs a real What-If diff where one exists.
-- **Phase 2e —** GCP, and further CLI fallback.
+- **Phase 2e — Google Cloud.** ✅ Asset-inventory search, VPC topology, quotas, and changes behind a gate that is honest about having almost nothing to preview.
 - **Phase 3 — the workflow designer.** Compose and run multi-step workflows over a shared workspace; the reason the layering above is enforced.
 - **Phase 3+ —** shell execution, then the software factory built on the workflow engine.
 

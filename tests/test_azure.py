@@ -1426,7 +1426,7 @@ def test_the_azure_dashboard_uses_the_azure_panels() -> None:
         "azure_cost",
         "azure_whoami",
     }
-    assert set(PANELS_BY_CLOUD) == {"k8s", "aws", "azure"}
+    assert set(PANELS_BY_CLOUD) == {"k8s", "aws", "azure", "gcp"}
 
 
 def test_only_kubernetes_panels_take_a_scope_argument() -> None:

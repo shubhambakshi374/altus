@@ -37,6 +37,21 @@ class StepStarted(BaseModel):
     """The subject, after substitution: the tool name, the resolved prompt."""
 
 
+class StepWaiting(BaseModel):
+    """One poll that did not satisfy the condition yet.
+
+    Emitted so a run that is waiting twenty minutes for CI reads as waiting
+    rather than as hung, and so the record afterwards shows how long it
+    actually took rather than only that it eventually worked.
+    """
+
+    type: Literal["step_waiting"] = "step_waiting"
+    step: str
+    attempt: int
+    elapsed: float
+    detail: str = ""
+
+
 class StepFinished(BaseModel):
     type: Literal["step_finished"] = "step_finished"
     step: str
@@ -44,6 +59,8 @@ class StepFinished(BaseModel):
     summary: str = ""
     output: str = ""
     seconds: float = 0.0
+    attempts: int = 1
+    """More than one only for a waiting step."""
     denied: bool = False
     """The user refused it at the gate, as opposed to it failing."""
 
@@ -65,7 +82,7 @@ class RunFinished(BaseModel):
 
 
 RunEvent = Annotated[
-    RunStarted | StepStarted | StepFinished | StepSkipped | RunFinished,
+    RunStarted | StepStarted | StepWaiting | StepFinished | StepSkipped | RunFinished,
     Field(discriminator="type"),
 ]
 

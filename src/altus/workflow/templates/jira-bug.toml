@@ -1,0 +1,95 @@
+# A Jira bug, from triage to transition.
+#
+# The shape most teams actually want: read the ticket, work out the fix, get a
+# human to agree, do it, raise the pull request, and move the ticket only once
+# the change is really merged --- not when the PR was opened, which is where
+# tickets usually go wrong.
+name = "jira-bug"
+description = "Take a Jira bug through to a merged pull request and transition it"
+
+[inputs.issue]
+description = "Jira issue key, e.g. PLAT-1234"
+required = true
+
+[inputs.repo]
+description = "owner/name. Defaults to this checkout's origin remote."
+default = "@git.origin"
+
+[[steps]]
+id = "ticket"
+kind = "tool"
+tool = "mcp_call"
+args = { server = "atlassian", tool = "getJiraIssue", arguments = { issueIdOrKey = "${inputs.issue}" } }
+
+[[steps]]
+id = "plan"
+kind = "agent"
+needs = ["ticket"]
+prompt = "This is the bug:\n${ticket}\n\nFind the code it describes and write a short plan: what to change, in which files, and how to tell it worked. If the ticket does not contain enough to act on, say what is missing instead of guessing. Do not change anything yet."
+tools = ["read_file", "glob", "grep", "git_log"]
+
+[[steps]]
+id = "approve_plan"
+kind = "approval"
+needs = ["plan"]
+message = "Fix ${inputs.issue} along these lines?"
+
+[[steps]]
+id = "branch"
+kind = "tool"
+needs = ["approve_plan"]
+tool = "git_branch"
+args = { name = "fix/${inputs.issue}", create = true }
+
+[[steps]]
+id = "fix"
+kind = "agent"
+needs = ["branch"]
+prompt = "Carry out this plan:\n\n${plan}\n\nMake the smallest change that fixes it. Do not commit --- a later step does that."
+tools = ["read_file", "glob", "grep", "edit_file", "write_file", "git_diff"]
+
+[[steps]]
+id = "commit"
+kind = "tool"
+needs = ["fix"]
+tool = "git_commit"
+args = { message = "fix(${inputs.issue}): from the plan above", paths = ["."] }
+
+[[steps]]
+id = "push"
+kind = "tool"
+needs = ["commit"]
+tool = "git_push"
+args = { remote = "origin", set_upstream = true }
+
+[[steps]]
+id = "pull_request"
+kind = "tool"
+needs = ["push"]
+tool = "mcp_do"
+args = { server = "github", tool = "create_pull_request", arguments = { owner = "${inputs.repo}", head = "fix/${inputs.issue}", base = "main", title = "fix(${inputs.issue})" } }
+
+[[steps]]
+id = "ci"
+kind = "tool"
+needs = ["pull_request"]
+tool = "mcp_call"
+args = { server = "github", tool = "actions_list", arguments = { owner = "${inputs.repo}", branch = "fix/${inputs.issue}" } }
+wait = { until = "conclusion", interval = 30, timeout = 1800 }
+
+[[steps]]
+id = "merged"
+kind = "tool"
+needs = ["ci"]
+tool = "mcp_call"
+args = { server = "github", tool = "pull_request_read", arguments = { owner = "${inputs.repo}" } }
+wait = { until = "merged_at", interval = 60, timeout = 86400 }
+
+# Only now. Transitioning when the PR opened is how a board fills up with
+# tickets that say Done next to code nobody merged.
+[[steps]]
+id = "transition"
+kind = "tool"
+needs = ["merged"]
+tool = "mcp_do"
+args = { server = "atlassian", tool = "transitionJiraIssue", arguments = { issueIdOrKey = "${inputs.issue}" } }

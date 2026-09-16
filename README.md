@@ -186,8 +186,9 @@ for the command you are writing.
 | `/mcp` · `/mcp check` | MCP servers, what each covers, and drift against the manifest |
 | `/workflow` · `/workflow <name>` | Open the workflow designer |
 | `/workflow new <what it should do>` | Describe one; the model drafts it, you approve the file |
+| `/workflow templates` · `/workflow new --from <t> [<name>]` | Start from one Altus ships |
 | `/workflow list` · `show` · `validate` · `path <name>` | The same workflows from the keyboard |
-| `/workflow run <name>` | Run one, step by step, on a screen |
+| `/workflow run <name> [k=v ...]` | Run one, step by step, on a screen |
 | `/workflow runs` · `/workflow runs <id>` | What has been run, and what happened |
 | `/dashboard [aws \| azure \| gcp \| k8s] [<scope>]` | Several read-only views on one screen |
 | `/graphics [auto \| image \| cells \| off]` | How visuals are drawn, and why |
@@ -346,8 +347,8 @@ never returns a number it did not get.
 The four clouds cover infrastructure. The systems around it — the ticket that
 explains a deploy, the dashboard that showed it failing, the warehouse the data
 landed in — have proprietary APIs with no corpus to sweep and vendor-maintained
-MCP servers already written. Altus ships seven of them kitted out. You bring
-credentials, not config files.
+MCP servers already written. Altus ships nine of them kitted out, and a door for
+anything else. You bring credentials, not config files.
 
 | Server | Covers |
 |---|---|
@@ -356,6 +357,8 @@ credentials, not config files.
 | `grafana` | Dashboards, Prometheus, Loki, Pyroscope, incidents, on-call |
 | `datadog` | Metrics, logs, traces, monitors, incidents, security signals |
 | `newrelic` | Entities, NRQL, alerts, errors, deployment impact |
+| `crowdstrike` | Detections, vulnerabilities, hosts, threat intel, containers, RTR |
+| `servicenow` | Incidents, changes, problems, the CMDB, knowledge |
 | `snowflake` | Cortex Analyst and Search, and whatever SQL the server object allows |
 | `databricks` | Genie spaces, Vector Search indexes, Unity Catalog functions |
 
@@ -363,8 +366,8 @@ Bitbucket is not a separate entry because it is not a separate server:
 Atlassian's hosted server carries it alongside Jira. That server is **Cloud
 only** — Jira Data Center cannot connect to it at all.
 
-**Four tools, however many servers connect.** Those seven publish well over two
-hundred tools between them, which is more schema than everything else Altus
+**Four tools, however many servers connect.** Those nine publish well over six
+hundred tools between them, which is far more schema than everything else Altus
 registers put together, so none of it sits in the prompt:
 
 | | |
@@ -379,15 +382,15 @@ registers put together, so none of it sits in the prompt:
 botocore, the ARM provider manifests and the 600 GCP discovery documents all
 ship on disk, so those classifiers read a corpus. An MCP server's tool list
 lives behind an authenticated connection to a product that ships on its own
-schedule. Altus classifies against a **manifest** instead — 476 tool names as
+schedule. Altus classifies against a **manifest** instead — 642 tool names as
 shipped — and it says where each one came from, because the three sources are
 not equally good:
 
 | `source` | Meaning | Servers |
 |---|---|---|
-| `derived` | Generated from an upstream machine-readable artifact at a pinned ref | github |
+| `derived` | Generated from an upstream machine-readable artifact at a pinned ref | github, crowdstrike |
 | `documented` | Parsed from the vendor's published tool table | grafana, datadog, newrelic |
-| `curated` | Written by hand; no machine-readable source exists | atlassian, snowflake, databricks |
+| `curated` | Written by hand, or structurally impossible to list | atlassian, snowflake, databricks, servicenow |
 
 GitHub is `derived` because its server checks a JSON snapshot of every tool into
 its own repository — annotations, descriptions and input schemas, generated from
@@ -447,8 +450,8 @@ url   = "https://acme.cloud.databricks.com/api/2.0/mcp/{scope}"
 scope = "genie/01ef"
 ```
 
-Six of the seven are hosted; only Grafana runs as a local subprocess, and Altus
-never installs it. Credentials come from the environment first and the OS
+Six of the nine are hosted; Grafana and CrowdStrike run as local subprocesses,
+and Altus never installs either. Credentials come from the environment first and the OS
 keyring second, never from `config.toml`; OAuth tokens go to the keyring too. A
 stdio server is handed `PATH` and its own credentials and nothing else —
 `os.environ` would give a third-party binary every other credential on the
@@ -462,9 +465,35 @@ one — or to diff it against the manifest — without an account.
 your model provider. Results are redacted and capped at `max_rows` on the way,
 and `mcp_servers` says so out loud rather than burying it here.
 
-Only these seven. Pointing Altus at an arbitrary MCP server would mean tools
-with no manifest, every one of them failing closed to a typed challenge — which
-is how a challenge stops being read.
+### And the rest
+
+A curated catalogue can never be finished — Darktrace has no official MCP
+server today — and the alternative to a door is that somebody forks Altus to
+add one. So there is a door, and it does not pretend:
+
+```toml
+[mcp.custom.darktrace]
+url     = "https://mcp.internal/darktrace"
+env     = ["DARKTRACE_TOKEN"]
+summary = "Darktrace threat detection"
+```
+
+```
+  darktrace   ready  (custom, unclassified)
+    Darktrace threat detection
+    no manifest --- this server is configured under [mcp.custom] and Altus
+    ships no manifest for it, so nothing is known about what its tools do
+    every tool needs a typed confirmation unless the server says otherwise
+```
+
+A custom server carries an empty manifest and the strictest fail-closed setting
+there is. Its own annotations still apply **as a ceiling**, so a tool it
+declares read-only classifies as a read — a custom server can lower its tools'
+sensitivity and can never raise its own trust.
+
+That is a real cost, and it is the point: the nine shipped servers were
+classified by a human against a source, and a tenth that nobody classified
+should not be able to sit in the list looking the same.
 
 ## Workflows
 
@@ -514,6 +543,77 @@ message = "ship to staging?"
 
 One file each, under `<config>/workflows`, meant to be diffed and committed
 next to the code it operates on.
+
+### Three to start from
+
+```
+/workflow templates
+  jira-bug             11 steps   Take a Jira bug through to a merged pull request and transition it
+  servicenow-change     8 steps   Raise a change, deploy behind its approval, and close it with the outcome
+  vuln-fix             13 steps   Check for vulnerabilities, fix one, raise a PR, and see it merged
+
+/workflow new --from vuln-fix api-vulns
+```
+
+Copied as text, comments and all — the prose explaining *why* a step is there
+is the part a reader needs most, and a round trip through the parser would drop
+every line of it. Each one is checked against a real tool registry in CI: a
+template that does not validate is worse than no template, because it teaches
+the format wrong and fails at the moment somebody trusted it.
+
+`vuln-fix` asks **two** vulnerability sources, and the split is the honest
+answer to a join that does not exist. GitHub's own scanning answers *what is
+wrong in this repository* — it knows the code and the dependency graph and
+needs no mapping. CrowdStrike answers *what is exploitable in what we are
+running*, which is a different question about a different artifact: Falcon's
+data is host- and image-centric and contains no repository identifier anywhere.
+A workflow claiming to find "the repo's vulnerabilities in CrowdStrike" would
+be inventing that join.
+
+### Workflows take inputs
+
+```toml
+[inputs.repo]
+description = "owner/name"
+default     = "@git.origin"   # this checkout's own remote
+
+[inputs.image]
+description = "container image to check in Falcon"
+required    = true
+```
+
+`/workflow run vuln-fix image=acme/api:1.2`, and anything required and missing
+is asked for **before the run gate** — an approval prompt showing
+`${inputs.repo}` where the target should be is approving nothing. An input
+nobody declared is refused rather than ignored, because a misspelt `repo=` that
+quietly does nothing runs against whatever the default was.
+
+`@git.origin` is the only dynamic default there is. Each one is something that
+can resolve differently on two machines, which is exactly what stops a workflow
+file being portable.
+
+### Steps that wait
+
+"Check CI has passed" and "check the PR is merged" are steps that poll.
+
+```toml
+[steps.wait]
+until    = "conclusion"   # this key must appear, non-empty, in the output
+interval = 30
+timeout  = 1800
+```
+
+Two forms and no operators: `until` names a JSON key that must appear with a
+non-empty value, or `contains` is a literal substring. The moment it grows `!=`
+it is an expression language, and a workflow whose shape depends on run-time
+values can no longer have its blast radius worked out before it runs. Anything
+needing a *decision* is an agent step, where the gate is already watching.
+
+**Only a read may wait**, refused by the validator rather than warned about:
+waiting means calling the same thing repeatedly, and nothing about "check until
+it is done" implies anybody wanted a mutation repeated. **A wait is not a
+retry** either — a step that failed did not produce an answer the condition
+could be true of.
 
 ### Steps pass text, and only to steps they depend on
 
@@ -891,10 +991,10 @@ altus/providers   one adapter per provider, all folding onto that union
 altus/config      configuration and credential resolution
 altus/storage     JSONL session persistence
 altus/workspace   the rooted filesystem context, and its containment rules
-altus/tools       the tools, one package per surface
+altus/tools       the tools, one package per surface (git, fs, and the clouds)
 altus/cloud       Kubernetes, AWS, Azure and GCP: auth, classifiers, targets
-altus/mcp         the seven shipped MCP servers and their manifests
-altus/workflow    what a workflow is, where it lives, and its blast radius
+altus/mcp         the nine shipped MCP servers, their manifests, and the custom door
+altus/workflow    what a workflow is, how it runs, and its blast radius
 altus/render      visuals, independent of the terminal drawing them
 altus/runner      one inference call
 altus/agent       the loop: inference, tool execution, repeat
@@ -1008,7 +1108,8 @@ tests/         mirrors it; tests/__snapshots__ holds the TUI SVGs
 - **Phase 2f — MCP.** ✅ Seven vendor servers kitted out, classified against a curated manifest that fails closed, with a gate honest about having no preview at all.
 - **Phase 3a — the workflow designer.** ✅ Compose multi-step workflows in a screen, in conversation or in a file, each with one honest blast radius. Headless, which is the promise the layering guard has been keeping since Phase 1.
 - **Phase 3b — the engine.** ✅ Run them: `${step}` substitution between steps, a failure that stops the run and names what it skipped, two gates, and a JSONL record written as it happens.
-- **Phase 3+ —** shell execution, then the software factory built on the workflow engine.
+- **Phase 3c — the factory floor.** ✅ CrowdStrike and ServiceNow, a `[mcp.custom]` door for the rest, local git, steps that wait, workflow inputs, and three templates that run end to end.
+- **Phase 3+ —** shell execution, triggers, and concurrency across independent branches.
 
 ## License
 

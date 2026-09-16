@@ -11,7 +11,7 @@ from typing import Any, ClassVar
 
 from altus.cloud.base import Sensitivity
 from altus.core.visuals import Table
-from altus.mcp.catalog import CATALOG
+from altus.mcp.catalog import catalog
 from altus.mcp.classify import classify, drift, manifest
 from altus.tools.base import ToolContext, ToolOutcome
 from altus.tools.mcp.base import MAX_CONTENT, McpTool
@@ -47,7 +47,7 @@ class McpServersTool(McpTool):
         enabled = {spec.id for spec in self.enabled_servers(ctx)}
         rows: list[list[str]] = []
         notes: list[str] = []
-        for spec in CATALOG:
+        for spec in catalog(self.settings(ctx)):
             state = "enabled" if spec.id in enabled else f"off — {spec.missing_hint}"
             table = manifest(spec.id)
             rows.append(

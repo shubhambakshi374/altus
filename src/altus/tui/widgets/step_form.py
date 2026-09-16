@@ -171,10 +171,11 @@ class StepForm(ModalScreen["AnyStep | None"]):
                 yield Label("prompt", classes="field")
                 yield Input(value=getattr(step, "prompt", ""), id="prompt")
                 yield Label(
-                    "tools it may use (comma separated; empty means all of them)",
+                    "tools it may use (comma separated; blank means all of them, "
+                    "'none' means no tools at all)",
                     classes="field",
                 )
-                yield Input(value=", ".join(getattr(step, "tools", []) or []), id="tools")
+                yield Input(value=_tools_text(step), id="tools")
             else:
                 yield Label("message shown to whoever approves", classes="field")
                 yield Input(value=getattr(step, "message", ""), id="message")
@@ -232,12 +233,33 @@ class StepForm(ModalScreen["AnyStep | None"]):
             prompt = self._value("prompt")
             if not prompt:
                 raise ValueError("an agent step needs a prompt")
-            tools = [part.strip() for part in self._value("tools").split(",") if part.strip()]
-            return AgentStep(id=step_id, needs=needs, prompt=prompt, tools=tools)
+            return AgentStep(
+                id=step_id, needs=needs, prompt=prompt, tools=_parse_tools(self._value("tools"))
+            )
         return ApprovalStep(id=step_id, needs=needs, message=self._value("message"))
 
     def action_close(self) -> None:
         self.dismiss(None)
+
+
+def _tools_text(step: AnyStep | None) -> str:
+    tools = getattr(step, "tools", None)
+    if tools is None:
+        return ""
+    return ", ".join(tools) if tools else "none"
+
+
+def _parse_tools(text: str) -> list[str] | None:
+    """Blank means every tool; `none` means no tools; anything else is a list.
+
+    The three states exist because an agent step with no tools named is as
+    dangerous as the worst tool in the session, and a summarising step should
+    be able to say it is not that.
+    """
+    named = [part.strip() for part in text.split(",") if part.strip()]
+    if not named:
+        return None
+    return [] if named == ["none"] else named
 
 
 def _args_text(step: AnyStep | None) -> str:

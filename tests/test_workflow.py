@@ -744,3 +744,108 @@ async def test_workflows_can_be_switched_off_entirely() -> None:
         app.config.workflow.enabled = False
         result = await dispatch_command(app, "/workflow list")
         assert result.severity == "warning"
+
+
+# ------------------------------------------------------------- the templates
+
+
+def real_registry() -> ToolRegistry:
+    """Everything a normal session would have, so a template is checked against
+    the tool names it will actually meet."""
+    return default_registry()
+
+
+@pytest.mark.parametrize("name", sorted(__import__("altus.workflow", fromlist=["x"]).templates()))
+def test_every_shipped_template_runs_as_written(name: str) -> None:
+    """A template that does not validate is worse than no template: it teaches
+    the format wrong and fails at the moment somebody trusted it."""
+    from altus.workflow import blast_radius, check, fatal, template
+
+    workflow = template(name)
+    registry = real_registry()
+    problems = check(workflow, registry)
+    assert not fatal(problems), [p.render() for p in problems]
+    assert workflow.steps
+    assert workflow.description, "a template that cannot say what it does is not one"
+    blast_radius(workflow, registry)
+
+
+@pytest.mark.parametrize("name", sorted(__import__("altus.workflow", fromlist=["x"]).templates()))
+def test_every_template_keeps_its_prose_when_copied(name: str, tmp_path) -> None:
+    """Copied as text, not parsed and re-rendered. The comments explaining why
+    each step is there are the part a reader needs most, and a round trip
+    through the model would drop every one of them."""
+    from altus.workflow import copy_template, path_for, template_text
+
+    copy_template(name, "mine")
+    written = path_for("mine").read_text(encoding="utf-8")
+    assert written.count("#") == template_text(name).count("#")
+    assert 'name = "mine"' in written
+    path_for("mine").unlink()
+
+
+def test_copying_over_an_existing_workflow_is_refused(tmp_path) -> None:
+    from altus.workflow import copy_template
+
+    copy_template("vuln-fix", "mine")
+    with pytest.raises(ConfigError, match="already exists"):
+        copy_template("jira-bug", "mine")
+
+
+def test_an_unknown_template_lists_the_real_ones() -> None:
+    from altus.workflow import template
+
+    with pytest.raises(ConfigError, match="vuln-fix"):
+        template("no-such-template")
+
+
+def test_a_template_name_that_would_escape_the_directory_is_refused() -> None:
+    from altus.workflow import template_text
+
+    with pytest.raises(ConfigError):
+        template_text("../../../etc/passwd")
+
+
+def test_the_vuln_fix_template_asks_two_sources_by_role() -> None:
+    """Falcon's data is host- and image-centric and contains no repository
+    identifier, so a workflow claiming to find "the repo's vulnerabilities in
+    CrowdStrike" would be inventing a join. This one asks both and says which
+    it is asking."""
+    from altus.workflow import template
+
+    workflow = template("vuln-fix")
+    servers = {
+        step.args.get("server")
+        for step in workflow.steps
+        if isinstance(step, ToolStep) and step.tool in {"mcp_call", "mcp_do"}
+    }
+    assert {"github", "crowdstrike"} <= servers
+    runtime = workflow.step("runtime")
+    assert runtime is not None
+    assert runtime.on_error == "continue", "a repo with no deployed image still gets reviewed"
+
+
+def test_an_agent_step_can_say_it_needs_no_tools_at_all() -> None:
+    """Three states, and the difference between the last two is the whole
+    reason `tools` is not a plain list: omitted means every tool and is
+    therefore as dangerous as the worst one, while empty means none and is a
+    read however long the prompt is."""
+    from altus.workflow import blast_radius
+
+    registry = real_registry()
+    everything = Workflow(name="a", steps=[AgentStep(id="s", prompt="go")])
+    nothing = Workflow(name="b", steps=[AgentStep(id="s", prompt="go", tools=[])])
+
+    assert blast_radius(everything, registry).level is Sensitivity.PRIVILEGED
+    assert blast_radius(nothing, registry).level is Sensitivity.READ
+    assert blast_radius(nothing, registry).certain
+
+
+def test_the_step_form_can_express_all_three_tool_states() -> None:
+    from altus.tui.widgets.step_form import _parse_tools, _tools_text
+
+    assert _parse_tools("") is None
+    assert _parse_tools("none") == []
+    assert _parse_tools("read_file, grep") == ["read_file", "grep"]
+    assert _tools_text(AgentStep(id="a", prompt="p")) == ""
+    assert _tools_text(AgentStep(id="a", prompt="p", tools=[])) == "none"

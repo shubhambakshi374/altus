@@ -77,7 +77,16 @@ class ServerSpec:
     unknown_why: str = "this tool is not in Altus's manifest"
     reference: str = ""
     notes: str = ""
+    source: str = "shipped"
+    """``shipped`` for the curated catalogue, ``custom`` for one the user
+    configured. A custom server has no manifest and Altus has vetted nothing
+    about it, so `/mcp` says so rather than letting it sit in the list looking
+    like the others."""
     _detect: Callable[[], bool] | None = field(default=None, repr=False)
+
+    @property
+    def custom(self) -> bool:
+        return self.source == "custom"
 
     def available(self) -> bool:
         """Whether this is worth offering --- the user's "if present".
@@ -179,6 +188,52 @@ CATALOG: tuple[ServerSpec, ...] = (
         ),
     ),
     ServerSpec(
+        id="crowdstrike",
+        products=("CrowdStrike Falcon",),
+        summary="Detections, vulnerabilities, hosts, threat intel and containers",
+        transport=Transport.STDIO,
+        auth=Auth.TOKEN,
+        command=("falcon-mcp",),
+        env=("FALCON_CLIENT_ID", "FALCON_CLIENT_SECRET", "FALCON_BASE_URL"),
+        read_only_flag=("--read-only",),
+        reference="https://github.com/CrowdStrike/falcon-mcp",
+        notes=(
+            "Upstream is in public preview, so its tool list may move between "
+            "releases --- the manifest is derived at a pinned tag and the weekly "
+            "drift job is what notices. Falcon's blast radius is the tenant, and "
+            "no argument names it, so set scope under [mcp.crowdstrike] to the "
+            "tenant you are pointed at; until you do, every mutation is treated "
+            "as an unresolved target and demands a typed confirmation."
+        ),
+    ),
+    ServerSpec(
+        id="servicenow",
+        products=("ServiceNow",),
+        summary="Incidents, changes, problems, the CMDB and knowledge",
+        transport=Transport.HTTP,
+        auth=Auth.TOKEN,
+        url="",
+        env=("SERVICENOW_TOKEN",),
+        unknown=Sensitivity.PRIVILEGED,
+        unknown_why=(
+            "a ServiceNow instance assembles its own tool list from role-based tool "
+            "packages, so a name Altus does not know could be a knowledge lookup or "
+            "a write to any table the caller can reach"
+        ),
+        reference=(
+            "https://www.servicenow.com/community/now-assist-articles/"
+            "mcp-server-console-faq/ta-p/3550125"
+        ),
+        notes=(
+            "No default URL on purpose: the endpoint is a service record created in "
+            "MCP Server Console on your own instance, so there is nothing to guess. "
+            "Set url under [mcp.servicenow]. Altus uses a bearer token rather than "
+            "its usual OAuth flow because MCP Server Console does not support "
+            "dynamic client registration --- every client has to be registered by an "
+            "administrator first, which Altus cannot do for you."
+        ),
+    ),
+    ServerSpec(
         id="snowflake",
         products=("Snowflake",),
         summary="Cortex Analyst and Search, and whatever SQL the server object allows",
@@ -241,13 +296,71 @@ DATABRICKS_SCOPES: dict[str, tuple[Sensitivity, str]] = {
 
 _BY_ID = {spec.id: spec for spec in CATALOG}
 
+#: What a custom server is told to fail closed to, and why. Deliberately the
+#: strictest setting: Altus has read no manifest, no documentation and no
+#: source for it, so the only honest position is that any tool it publishes
+#: could do anything. The server's own annotations still apply as a ceiling,
+#: so a tool it declares read-only classifies as a read --- a custom server can
+#: lower its tools' sensitivity but cannot raise its own trust.
+CUSTOM_UNKNOWN_WHY = (
+    "this server is configured under [mcp.custom] and Altus ships no manifest "
+    "for it, so nothing is known about what its tools do"
+)
 
-def server_spec(server: str) -> ServerSpec | None:
-    return _BY_ID.get(server)
+
+def custom_servers(settings: Any = None) -> tuple[ServerSpec, ...]:
+    """``[mcp.custom.<name>]`` entries, as specs.
+
+    The door onto "and the rest". It exists because a curated catalogue can
+    never be finished --- Darktrace has no official MCP server today --- and
+    the alternative to a door is that somebody forks Altus to add one.
+
+    What it deliberately does not do is pretend. A custom server is carried
+    with an empty manifest and the strictest fail-closed setting there is, and
+    every surface that lists it says `custom, unclassified`.
+    """
+    entries = dict(getattr(settings, "custom", {}) or {}) if settings is not None else {}
+    out: list[ServerSpec] = []
+    for name, entry in sorted(entries.items()):
+        command = tuple(getattr(entry, "command", ()) or ())
+        out.append(
+            ServerSpec(
+                id=name,
+                products=(getattr(entry, "summary", "") or name,),
+                summary=getattr(entry, "summary", "") or f"custom MCP server {name}",
+                transport=Transport.STDIO if command else Transport.HTTP,
+                auth=Auth(getattr(entry, "auth", "token") or "token"),
+                url=getattr(entry, "url", "") or "",
+                command=command,
+                env=tuple(getattr(entry, "env", ()) or ()),
+                unknown=Sensitivity.PRIVILEGED,
+                unknown_why=CUSTOM_UNKNOWN_WHY,
+                reference=getattr(entry, "reference", "") or "",
+                source="custom",
+            )
+        )
+    return tuple(out)
 
 
-def available_servers() -> tuple[ServerSpec, ...]:
-    return tuple(spec for spec in CATALOG if spec.available())
+def catalog(settings: Any = None) -> tuple[ServerSpec, ...]:
+    """Every server this session knows about: the shipped nine, then any custom.
+
+    One function because there are four doors onto the question --- `/mcp`,
+    `mcp_servers`, the gate and the session --- and the gcloud classifier
+    already taught what happens when two of them decide separately.
+    """
+    return CATALOG + custom_servers(settings)
+
+
+def server_spec(server: str, settings: Any = None) -> ServerSpec | None:
+    found = _BY_ID.get(server)
+    if found is not None:
+        return found
+    return next((spec for spec in custom_servers(settings) if spec.id == server), None)
+
+
+def available_servers(settings: Any = None) -> tuple[ServerSpec, ...]:
+    return tuple(spec for spec in catalog(settings) if spec.available())
 
 
 def enabled_servers(settings: Any = None) -> tuple[ServerSpec, ...]:
@@ -264,7 +377,7 @@ def enabled_servers(settings: Any = None) -> tuple[ServerSpec, ...]:
     """
     chosen = list(getattr(settings, "servers", ()) or ())
     out: list[ServerSpec] = []
-    for spec in CATALOG:
+    for spec in catalog(settings):
         per = settings.for_server(spec.id) if settings is not None else None
         enabled = getattr(per, "enabled", None)
         if enabled is False:

@@ -51,7 +51,7 @@ class AltusApp(App[None]):
         self.profile = profile
         self.workspace = build_workspace(self.config, root=workspace_root, extra_roots=extra_roots)
         self.registry: ToolRegistry = default_registry(
-            cloud=self.config.cloud, mcp_settings=self.config.mcp
+            cloud=self.config.cloud, mcp_settings=self.config.mcp, git=self.config.tools.git
         )
         self.approvals = SessionApprovals(AllowAll() if auto_approve else InteractiveApproval(self))
         self.tool_ctx: ToolContext = build_tool_context(

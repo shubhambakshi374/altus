@@ -88,6 +88,7 @@ class ToolRegistry:
 def default_registry(
     *,
     writes: bool = True,
+    git: bool = True,
     kubernetes: bool | None = None,
     aws: bool | None = None,
     azure: bool | None = None,
@@ -113,10 +114,18 @@ def default_registry(
 
     ``mcp_settings`` is an ``McpSettings``; it lives outside ``CloudSettings``
     because MCP is not a cloud.
+
+    ``git`` registers the local git tools. They need no SDK and no credentials
+    --- only a `git` binary, which every path here already assumes --- so they
+    are on by default and `[tools] git = false` is how a session opts out.
     """
     tools: list[Tool] = [ReadFileTool(), ListDirTool(), GlobTool(), GrepTool()]
     if writes:
         tools += [WriteFileTool(), EditFileTool(), DeletePathTool()]
+    if git:
+        from altus.tools.git import git_tools
+
+        tools += git_tools(writes=writes)
     # Cloud tools are assembled below and filtered at the end, because their
     # own switches decide registration first and `writes` is the floor.
 

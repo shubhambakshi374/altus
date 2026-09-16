@@ -23,6 +23,24 @@ from altus.core.errors import ConfigError
 from altus.workflow.models import Workflow, valid_slug
 
 SUFFIX = ".toml"
+TEMPLATES = Path(__file__).parent / "templates"
+
+#: What a step's keys look like when read top to bottom: what it is, what it
+#: waits for, then how it behaves. Anything unlisted sorts between `args` and
+#: the trailing pair, alphabetically, so a new field cannot silently land in
+#: the middle of the identity block.
+KEY_ORDER = {
+    "id": 0,
+    "kind": 1,
+    "needs": 2,
+    "tool": 10,
+    "args": 11,
+    "prompt": 12,
+    "tools": 13,
+    "message": 14,
+    "wait": 90,
+    "on_error": 91,
+}
 
 
 def workflows_dir(settings: Any = None) -> Path:
@@ -59,16 +77,58 @@ def render(workflow: Workflow) -> str:
     payload: dict[str, Any] = {"name": workflow.name}
     if workflow.description:
         payload["description"] = workflow.description
-    steps: list[dict[str, Any]] = []
+    if workflow.inputs:
+        # Before [[steps]]: TOML puts every table after the scalars that follow
+        # it, so an `inputs` table written later would swallow the step array.
+        payload["inputs"] = {
+            name: spec.model_dump(mode="json", exclude_defaults=True)
+            for name, spec in workflow.inputs.items()
+        }
+    out = tomli_w.dumps(payload).rstrip()
     for step in workflow.steps:
         # exclude_defaults keeps an empty `needs` or `args` out of the file, so
         # a hand-written workflow stays as short as the author wrote it.
         rest = step.model_dump(mode="json", exclude_defaults=True)
         rest.pop("id", None)
         rest.pop("kind", None)
-        steps.append({"id": step.id, "kind": step.kind, **rest})
-    payload["steps"] = steps
-    return tomli_w.dumps(payload)
+        out += "\n\n" + _step_toml({"id": step.id, "kind": step.kind, **rest})
+    return out + "\n"
+
+
+def _step_toml(entry: dict[str, Any]) -> str:
+    """One ``[[steps]]`` block, written out rather than left to tomli_w.
+
+    tomli_w decides between a block and a one-line inline table by a heuristic
+    about what the values happen to contain, so the same workflow could render
+    either way depending on whether a step had a `needs` entry. This is the
+    format people read, diff and commit, and it should not shift under them.
+    """
+    lines = ["[[steps]]"]
+    ordered = sorted(entry.items(), key=lambda item: (KEY_ORDER.get(item[0], 50), item[0]))
+    lines += [f"{key} = {_value(value)}" for key, value in ordered]
+    return "\n".join(lines)
+
+
+def _value(value: Any) -> str:
+    """One TOML value, inline. The value space is whatever JSON allows,
+    because that is what a tool's arguments are."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    if isinstance(value, str):
+        return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
+    if isinstance(value, list):
+        return "[" + ", ".join(_value(item) for item in value) + "]"
+    if isinstance(value, dict):
+        inner = ", ".join(f"{key} = {_value(item)}" for key, item in value.items())
+        return "{ " + inner + " }" if inner else "{}"
+    if value is None:
+        # Nothing in a workflow should reach here --- every optional field is
+        # excluded by exclude_defaults --- and TOML has no null, so an empty
+        # string is the only representable thing.
+        return '""'
+    return _value(str(value))
 
 
 def load(name: str, settings: Any = None) -> Workflow:
@@ -104,3 +164,45 @@ def delete(name: str, settings: Any = None) -> bool:
         return False
     path.unlink()
     return True
+
+
+# ------------------------------------------------------------------ templates
+
+
+def templates() -> list[str]:
+    """The workflows Altus ships as starting points."""
+    return sorted(path.stem for path in TEMPLATES.glob(f"*{SUFFIX}"))
+
+
+def template(name: str) -> Workflow:
+    """One shipped template, parsed. Raises if there is no such thing."""
+    path = TEMPLATES / f"{name}{SUFFIX}"
+    if not valid_slug(name) or not path.is_file():
+        raise ConfigError(f"no template called {name!r}. Available: {', '.join(templates())}")
+    return parse(path.read_text(encoding="utf-8"), name=name, where=str(path))
+
+
+def template_text(name: str) -> str:
+    """The file as written, comments and all --- which is most of its value."""
+    path = TEMPLATES / f"{name}{SUFFIX}"
+    if not valid_slug(name) or not path.is_file():
+        raise ConfigError(f"no template called {name!r}. Available: {', '.join(templates())}")
+    return path.read_text(encoding="utf-8")
+
+
+def copy_template(name: str, into: str, settings: Any = None) -> Path:
+    """Copy a template to a new workflow, keeping its prose.
+
+    Copied as text rather than parsed and re-rendered, because the comments
+    explaining *why* each step is there are the part a reader needs most and
+    a round trip through the model would drop every one of them.
+    """
+    text = template_text(name)
+    path = path_for(into, settings)
+    if path.exists():
+        raise ConfigError(f"{into} already exists at {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # The name lives in the file too, and the stem wins on load --- but leaving
+    # the template's name inside a copy is confusing to read.
+    path.write_text(text.replace(f'name = "{name}"', f'name = "{into}"', 1), encoding="utf-8")
+    return path

@@ -16,12 +16,16 @@ from altus.workflow.events import (
     StepSkipped,
     StepStarted,
 )
+from altus.workflow.inputs import missing as missing_inputs
+from altus.workflow.inputs import resolve as resolve_inputs
 from altus.workflow.models import (
     AgentStep,
     AnyStep,
     ApprovalStep,
+    Input,
     Step,
     ToolStep,
+    Wait,
     Workflow,
     describe,
     valid_slug,
@@ -29,12 +33,16 @@ from altus.workflow.models import (
 from altus.workflow.refs import refs_in, substitute
 from altus.workflow.runs import RunRecorder, list_runs, read_run, runs_dir, summarise
 from altus.workflow.store import (
+    copy_template,
     list_workflows,
     load,
     parse,
     path_for,
     render,
     save,
+    template,
+    template_text,
+    templates,
     workflows_dir,
 )
 from altus.workflow.validate import Problem, check, fatal, runnable
@@ -44,6 +52,7 @@ __all__ = [
     "AnyStep",
     "ApprovalStep",
     "Blast",
+    "Input",
     "Problem",
     "RunEvent",
     "RunFinished",
@@ -56,20 +65,24 @@ __all__ = [
     "StepSkipped",
     "StepStarted",
     "ToolStep",
+    "Wait",
     "Workflow",
     "blast_radius",
     "check",
+    "copy_template",
     "describe",
     "fatal",
     "list_runs",
     "list_workflows",
     "load",
+    "missing_inputs",
     "order",
     "parse",
     "path_for",
     "read_run",
     "refs_in",
     "render",
+    "resolve_inputs",
     "run_workflow",
     "runnable",
     "runs_dir",
@@ -77,6 +90,9 @@ __all__ = [
     "step_level",
     "substitute",
     "summarise",
+    "template",
+    "template_text",
+    "templates",
     "valid_slug",
     "workflows_dir",
 ]

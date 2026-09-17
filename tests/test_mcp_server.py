@@ -325,3 +325,248 @@ async def test_a_mutation_is_not_even_listed_without_allow_writes(tmp_path: Path
 async def test_the_server_says_what_it_is_for(tmp_path: Path) -> None:
     async with connected(registry(), session_context(tmp_path), ExposeSettings()) as client:
         assert "redacted" in (client.instructions or "")
+
+
+# ------------------------------------------------------- the gate, one hop away
+
+
+def answering(action: str = "accept", **content: object):  # type: ignore[no-untyped-def]
+    """A client that can elicit, and answers this way every time."""
+    import mcp.types as types
+
+    seen: list[str] = []
+
+    async def callback(context: object, params: object) -> types.ElicitResult:
+        seen.append(getattr(params, "message", ""))
+        return types.ElicitResult(action=action, content=dict(content) or None)
+
+    callback.seen = seen  # type: ignore[attr-defined]
+    return callback
+
+
+def writes() -> ExposeSettings:
+    return ExposeSettings(allow_writes=True, workflows=False)
+
+
+def a_repo(tmp_path: Path) -> Path:
+    """A real git checkout, so a git tool reaches the gate instead of stopping
+    at "this is not a repository" and passing the test for the wrong reason."""
+    import subprocess
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    for args in (
+        ["init", "-q", "-b", "main"],
+        ["config", "user.email", "t@example.invalid"],
+        ["config", "user.name", "Test"],
+    ):
+        subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)
+    (root / "app.py").write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-qm", "first"], cwd=root, check=True, capture_output=True)
+    return root
+
+
+async def test_a_client_that_cannot_elicit_is_not_even_offered_the_mutations(
+    tmp_path: Path,
+) -> None:
+    """A tool listed but never callable is a capability that fails at the
+    moment somebody trusted it."""
+    async with connected(registry(), session_context(tmp_path), writes()) as client:
+        listed = await client.list_tools()
+
+    assert not {tool.name for tool in listed.tools} & {"k8s_delete", "git_push", "aws_write"}
+
+
+async def test_a_client_that_can_elicit_is_offered_them(tmp_path: Path) -> None:
+    async with connected(
+        registry(), session_context(tmp_path), writes(), elicit=answering()
+    ) as client:
+        listed = await client.list_tools()
+
+    assert {"k8s_delete", "git_push", "aws_write"} <= {tool.name for tool in listed.tools}
+
+
+async def test_calling_a_mutation_with_nobody_there_refuses_and_says_why(
+    tmp_path: Path,
+) -> None:
+    """Not a denial --- a denial is an answer somebody gave. This is the server
+    declining to assume the client asked a human, which is a claim about
+    software it cannot inspect."""
+    async with connected(registry(), session_context(a_repo(tmp_path)), writes()) as client:
+        result = await client.call_tool("git_branch", {"name": "x"})
+
+    assert result.is_error
+    assert "elicitation capability" in result.content[0].text
+
+
+async def test_the_human_on_the_other_side_sees_what_the_modal_shows(
+    tmp_path: Path,
+) -> None:
+    from altus.tools.base import ToolContext
+
+    asked = answering(approve=True)
+    ctx = ToolContext(workspace=Workspace(root=a_repo(tmp_path)))
+    async with connected(registry(), ctx, writes(), elicit=asked) as client:
+        result = await client.call_tool("git_branch", {"name": "fix/thing"})
+
+    assert asked.seen, "nothing was asked"
+    question = asked.seen[0]
+    assert "fix/thing" in question
+    assert "Uncommitted changes travel with you" in question
+    assert "undo: git switch main goes back" in question
+    assert not result.is_error
+
+
+async def test_declining_at_the_client_stops_the_call(tmp_path: Path) -> None:
+    from altus.tools.approval import RecordingPolicy
+
+    repo = a_repo(tmp_path)
+    ctx = session_context(repo, RecordingPolicy())
+    async with connected(registry(), ctx, writes(), elicit=answering("decline")) as client:
+        result = await client.call_tool("git_branch", {"name": "nope"})
+
+    assert "declined" in result.content[0].text
+    assert not (repo / ".git" / "refs" / "heads" / "nope").exists()
+
+
+async def test_accepting_without_ticking_the_box_is_not_an_approval(tmp_path: Path) -> None:
+    """`action: accept` with `approve: false` is somebody submitting the form
+    having said no."""
+    async with connected(
+        registry(), session_context(a_repo(tmp_path)), writes(), elicit=answering(approve=False)
+    ) as client:
+        result = await client.call_tool("git_branch", {"name": "nope"})
+
+    assert "declined" in result.content[0].text
+
+
+def test_a_privileged_request_asks_for_the_challenge_to_be_typed() -> None:
+    """A privileged call does not get easier for having arrived over a socket."""
+    from altus.mcp.serve import ElicitApprovals
+    from altus.tools.approval import ApprovalRequest
+
+    gate = ElicitApprovals(session=None)
+    request = ApprovalRequest(
+        tool="k8s_delete",
+        action="delete",
+        path="prod-db",
+        target="aks-prod/default",
+        sensitivity=Sensitivity.PRIVILEGED,
+        protected=True,
+    )
+    schema = gate.schema(request)
+
+    assert request.needs_challenge
+    assert schema["properties"]["confirm"]["type"] == "string"
+    assert "prod-db" in schema["properties"]["confirm"]["title"]
+    assert "protected" in gate.describe(request)
+
+
+async def test_a_wrong_challenge_answer_denies() -> None:
+    from altus.mcp.serve import ElicitApprovals
+    from altus.tools.approval import ApprovalRequest, Decision
+
+    class Session:
+        def check_client_capability(self, capability: object) -> bool:
+            return True
+
+        async def elicit_form(self, message: str, requested_schema: dict, related_request_id=None):  # type: ignore[no-untyped-def]
+            import mcp.types as types
+
+            return types.ElicitResult(action="accept", content={"confirm": "not-it"})
+
+    gate = ElicitApprovals(session=Session())
+    request = ApprovalRequest(
+        tool="k8s_delete", action="delete", path="prod-db", sensitivity=Sensitivity.PRIVILEGED
+    )
+    assert await gate.request(request) is Decision.DENY
+
+
+# ------------------------------------------------------- workflows as capabilities
+
+
+def save_workflow(name: str, **over: object) -> None:
+    from altus.workflow import Workflow, save
+    from altus.workflow.models import Input, ToolStep
+
+    save(
+        Workflow(
+            name=name,
+            description="look at the cluster",
+            inputs={"context": Input(description="which cluster")},
+            steps=[ToolStep(id="look", tool="k8s_contexts", args={})],
+            **over,
+        )
+    )
+
+
+def save_mutating_workflow(name: str) -> None:
+    from altus.workflow import Workflow, save
+    from altus.workflow.models import ToolStep
+
+    save(
+        Workflow(
+            name=name,
+            description="change something",
+            steps=[ToolStep(id="go", tool="k8s_scale", args={"name": "api", "replicas": 2})],
+        )
+    )
+
+
+async def test_each_saved_workflow_is_a_tool_of_its_own(tmp_path: Path) -> None:
+    from altus.config.models import Config
+
+    save_workflow("look-around")
+    config = Config()
+    async with connected(
+        registry(), session_context(tmp_path), ExposeSettings(), config=config
+    ) as client:
+        listed = await client.list_tools()
+
+    tool = next(t for t in listed.tools if t.name == "workflow_look-around")
+    assert "look at the cluster" in tool.description
+    assert "blast radius" in tool.description
+    assert tool.input_schema["properties"]["context"]["description"] == "which cluster"
+    assert tool.annotations.read_only_hint is True
+
+
+async def test_a_mutating_workflow_is_not_offered_without_writes(tmp_path: Path) -> None:
+    from altus.config.models import Config
+
+    save_mutating_workflow("change-things")
+    async with connected(
+        registry(), session_context(tmp_path), ExposeSettings(), config=Config()
+    ) as client:
+        listed = await client.list_tools()
+        result = await client.call_tool("workflow_change-things", {})
+
+    assert "workflow_change-things" not in {t.name for t in listed.tools}
+    assert result.is_error
+    assert "allow_writes" in result.content[0].text
+
+
+async def test_a_mutating_workflow_needs_somebody_to_ask(tmp_path: Path) -> None:
+    from altus.config.models import Config
+
+    save_mutating_workflow("change-things")
+    settings = ExposeSettings(allow_writes=True)
+    async with connected(
+        registry(), session_context(tmp_path), settings, config=Config()
+    ) as client:
+        result = await client.call_tool("workflow_change-things", {})
+
+    assert result.is_error
+    assert "elicitation capability" in result.content[0].text
+
+
+async def test_workflows_can_be_switched_off(tmp_path: Path) -> None:
+    from altus.config.models import Config
+
+    save_workflow("look-around")
+    async with connected(
+        registry(), session_context(tmp_path), ExposeSettings(workflows=False), config=Config()
+    ) as client:
+        listed = await client.list_tools()
+
+    assert not any(t.name.startswith("workflow_") for t in listed.tools)

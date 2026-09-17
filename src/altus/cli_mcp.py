@@ -75,3 +75,47 @@ def _workflow_lines(config: Any, registry: Any) -> None:
             else "  (withheld: it changes things and allow_writes is false)"
         )
         typer.echo(f"  workflow_{name:<20} {len(workflow.steps)} steps  {radius.render()}{held}")
+
+
+@app.command("serve")
+def mcp_serve() -> None:
+    """Offer this machine's Altus over MCP, on stdin and stdout.
+
+    A client spawns this; it is not a daemon and there is no port. Everything
+    it will offer is what `altus mcp expose` prints, and nothing is written to
+    stdout but the protocol --- a stray print here corrupts the stream.
+    """
+    import asyncio
+    import sys
+
+    from altus.agent import build_tool_context, build_workspace
+    from altus.config import load_config
+    from altus.mcp.serve import serve_stdio
+    from altus.tools.approval import DenyAll, SessionApprovals
+    from altus.tools.registry import default_registry
+
+    config = load_config()
+    if not config.mcp.expose.enabled:
+        typer.secho(
+            "error: serving is off. Set [mcp.expose] enabled = true, then run "
+            "`altus mcp expose` to see exactly what that would offer.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    workspace = build_workspace(config)
+    registry = default_registry(
+        cloud=config.cloud, mcp_settings=config.mcp, shell=config.tools.shell
+    )
+    # DenyAll is the floor, not the policy: `_with_gate` swaps in the
+    # elicitation gate per call, and a request that reaches this one is a
+    # request nothing was able to ask a person about.
+    ctx = build_tool_context(
+        config, workspace, approvals=SessionApprovals(DenyAll()), registry=registry
+    )
+    typer.secho("altus mcp server on stdio", fg=typer.colors.BRIGHT_BLACK, err=True)
+    try:
+        asyncio.run(serve_stdio(registry, ctx, config.mcp.expose, config=config))
+    except KeyboardInterrupt:
+        sys.exit(130)

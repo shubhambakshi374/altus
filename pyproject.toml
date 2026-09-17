@@ -39,14 +39,18 @@ azure = ["azure-identity>=1.20"]
 gcp = ["google-api-python-client>=2.150", "google-auth>=2.35"]
 all = [
     "kubernetes>=32.0",
-    "mcp>=1.9",
+    "mcp>=2.2",
     "textual-image[textual]>=0.14",
     "azure-identity>=1.20",
     "google-api-python-client>=2.150",
     "google-auth>=2.35",
 ]
 mcp = [
-    "mcp>=1.9",
+    # 2.x, not 1.9: the client path here already calls the v2 spelling
+    # (`mcp.client.streamable_http.streamable_http_client`), and the server
+    # path needs the v2 `Server(on_list_tools=..., on_call_tool=...)` callbacks
+    # --- v1 used decorators. The pin was behind what the code already required.
+    "mcp>=2.2",
 ]
 
 [project.urls]

@@ -117,6 +117,10 @@ class ToolContext:
     """The session's ``ToolRegistry``, for the one tool that has to reason
     about the others. Typed loosely because ``tools.registry`` imports this
     module. None means a caller that never needed it."""
+    shell_settings: Any = None
+    """An ``altus.config.models.ShellSettings``. Read at call time as well as
+    at registration, for the reason ``cli_allowlist`` is: a tool must not
+    depend on having been registered correctly in order to be safe."""
     max_file_bytes: int = DEFAULT_MAX_FILE_BYTES
     max_lines: int = DEFAULT_MAX_LINES
     max_entries: int = DEFAULT_MAX_ENTRIES

@@ -11,13 +11,14 @@ from __future__ import annotations
 import asyncio
 from contextlib import aclosing
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
 from altus.core.events import MessageEnd, MessageStart, TextDelta
 from altus.core.session import Session
 from altus.core.types import StopReason, Usage
-from altus.tools.approval import AllowAll, Decision, RecordingPolicy
+from altus.tools.approval import AllowAll, Decision, ParkOnApproval, RecordingPolicy
 from altus.tools.base import BaseTool, ToolContext, ToolOutcome
 from altus.tools.registry import ToolRegistry, default_registry
 from altus.workflow import (
@@ -874,3 +875,437 @@ def test_a_step_key_order_does_not_shift_under_the_reader() -> None:
     body = [line.split(" =")[0] for line in text.splitlines() if " = " in line]
     assert body == ["name", "id", "kind", "tool", "args", "wait", "on_error"]
     assert "[[steps]]" in text
+
+
+# --------------------------------------------------------------- concurrency
+
+
+class SlowTool(BaseTool):
+    """A read that takes a while, so "together" and "one after another" differ."""
+
+    name: ClassVar[str] = "slow_read"
+    description: ClassVar[str] = "waits, then answers"
+    read_only: ClassVar[bool] = True
+    input_schema: ClassVar[dict] = {"type": "object", "properties": {"delay": {"type": "number"}}}
+
+    def __init__(self) -> None:
+        self.in_flight = 0
+        self.most = 0
+
+    async def run(self, args, ctx):  # type: ignore[no-untyped-def]
+        self.in_flight += 1
+        self.most = max(self.most, self.in_flight)
+        try:
+            await asyncio.sleep(float(args.get("delay") or 0.05))
+        finally:
+            self.in_flight -= 1
+        return ToolOutcome(content="done", summary="done")
+
+
+def independent(count: int, **over) -> Workflow:  # type: ignore[no-untyped-def]
+    return Workflow(
+        name="fan",
+        steps=[ToolStep(id=f"s{n}", tool="slow_read", args={}) for n in range(1, count + 1)],
+        **over,
+    )
+
+
+async def test_waves_group_steps_with_no_path_between_them() -> None:
+    from altus.workflow.engine import waves
+
+    workflow = Workflow(
+        name="dag",
+        steps=[
+            ToolStep(id="a", tool="read_file", args={}),
+            ToolStep(id="b", tool="read_file", args={}),
+            ToolStep(id="c", tool="read_file", args={}, needs=["a", "b"]),
+        ],
+    )
+    assert [[s.id for s in wave] for wave in waves(workflow)] == [["a", "b"], ["c"]]
+
+
+async def test_parallel_runs_a_wave_together(tree: Path) -> None:
+    tool = SlowTool()
+    registry = ToolRegistry([tool])
+    events = await collect(independent(3, parallel=3), registry, context(tree, registry))
+
+    assert tool.most == 3
+    assert len(kinds(events, "step_finished")) == 3
+    assert {e.wave for e in kinds(events, "step_started")} == {1}
+
+
+async def test_one_at_a_time_is_still_one_at_a_time(tree: Path) -> None:
+    """The default has to mean today's behaviour, or every workflow written
+    before this existed quietly changed meaning."""
+    tool = SlowTool()
+    registry = ToolRegistry([tool])
+    events = await collect(independent(3), registry, context(tree, registry))
+
+    assert tool.most == 1
+    assert [e.step for e in kinds(events, "step_started")] == ["s1", "s2", "s3"]
+
+
+async def test_the_record_says_how_many_could_run_at_once(tree: Path, tmp_path: Path) -> None:
+    tool = SlowTool()
+    registry = ToolRegistry([tool])
+    events = await collect(independent(2, parallel=2), registry, context(tree, registry))
+
+    started = kinds(events, "run_started")[0]
+    assert started.parallel == 2
+
+
+async def test_a_failure_in_a_wave_lets_what_is_running_finish(tree: Path) -> None:
+    """Already in flight is not the same as not yet begun.
+
+    Killing a sibling mid-mutation to honour "the run stops here" would be
+    worse than letting it land, so a step that has started finishes; a step
+    that has not is skipped by name.
+    """
+    registry = ToolRegistry(
+        [
+            SlowTool(),
+            *default_registry(kubernetes=False, aws=False, azure=False, gcp=False, mcp=False),
+        ]
+    )
+    workflow = Workflow(
+        name="fail",
+        parallel=3,
+        steps=[
+            ToolStep(id="slow", tool="slow_read", args={}),
+            read("missing.md", id="bad"),
+            read(id="after", needs=["bad"]),
+        ],
+    )
+    events = await collect(workflow, registry, context(tree, registry))
+
+    finished = kinds(events, "run_finished")[0]
+    assert finished.state == "failed"
+    assert finished.detail.startswith("bad:")
+    assert {e.step for e in kinds(events, "step_finished")} == {"slow", "bad"}
+    assert [e.step for e in kinds(events, "step_skipped")] == ["after"]
+
+
+async def test_nothing_new_starts_once_the_run_is_stopping(tree: Path) -> None:
+    """Sequential-but-independent: three steps in one wave, the first fails.
+
+    With parallel = 1 the second and third have not begun, so they are skipped
+    by name --- exactly what a linear run has always done.
+    """
+    registry = default_registry(kubernetes=False, aws=False, azure=False, gcp=False, mcp=False)
+    workflow = Workflow(
+        name="fail",
+        steps=[read("missing.md", id="bad"), read(id="b"), read(id="c")],
+    )
+    events = await collect(workflow, registry, context(tree, registry))
+
+    assert [e.step for e in kinds(events, "step_finished")] == ["bad"]
+    assert [e.step for e in kinds(events, "step_skipped")] == ["b", "c"]
+
+
+async def test_two_steps_in_one_wave_never_prompt_at_once(tree: Path) -> None:
+    """Concurrency is for waiting on somebody else's API, not for asking a
+    person two questions simultaneously."""
+
+    class Watcher:
+        def __init__(self) -> None:
+            self.inside = 0
+            self.most = 0
+
+        async def request(self, req):  # type: ignore[no-untyped-def]
+            self.inside += 1
+            self.most = max(self.most, self.inside)
+            await asyncio.sleep(0.02)
+            self.inside -= 1
+            return Decision.ALLOW
+
+    watcher = Watcher()
+    registry = default_registry(kubernetes=False, aws=False, azure=False, gcp=False, mcp=False)
+    workflow = Workflow(
+        name="two-gates",
+        parallel=2,
+        steps=[
+            ToolStep(id="one", tool="write_file", args={"path": "a.txt", "content": "a"}),
+            ToolStep(id="two", tool="write_file", args={"path": "b.txt", "content": "b"}),
+        ],
+    )
+    await collect(workflow, registry, context(tree, registry, watcher))
+
+    assert watcher.most == 1
+
+
+async def test_cancelling_a_parallel_run_still_writes_an_ending(tree: Path, tmp_path: Path) -> None:
+    tool = SlowTool()
+    registry = ToolRegistry([tool])
+    runs = tmp_path / "runs"
+
+    async def go() -> None:
+        async with aclosing(
+            run_workflow(
+                independent(3, parallel=3),
+                registry,
+                context(tree, registry),
+                record=True,
+                runs_root=runs,
+            )
+        ) as events:
+            async for _ in events:
+                pass
+
+    task = asyncio.create_task(go())
+    await asyncio.sleep(0.02)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    run_id = sorted(p.stem for p in runs.glob("*.jsonl"))[0]
+    replay = read_run(run_id, runs)
+    assert replay[-1].type == "run_finished"
+    assert replay[-1].state == "cancelled"
+    assert replay[-1].detail == "interrupted"
+    assert "cancelled" in summarise(replay)
+
+
+# ------------------------------------------------------------------- parking
+
+
+def gated(**over):  # type: ignore[no-untyped-def]
+    return ToolStep(tool="write_file", args={"path": "out.txt", "content": "hi"}, **over)
+
+
+async def park(workflow: Workflow, registry, tree: Path, runs: Path):  # type: ignore[no-untyped-def]
+    return await collect(
+        workflow,
+        registry,
+        context(tree, registry, ParkOnApproval()),
+        record=True,
+        runs_root=runs,
+    )
+
+
+async def test_an_unattended_run_stops_at_the_gate_rather_than_guessing(
+    tree: Path, tmp_path: Path, registry
+) -> None:
+    """Not a denial. A denial is an answer somebody gave; this is nobody
+    having been asked, and a record that conflates them records a decision
+    that was never made."""
+    runs = tmp_path / "runs"
+    workflow = Workflow(name="park", steps=[read(id="look"), gated(id="write", needs=["look"])])
+    events = await park(workflow, registry, tree, runs)
+
+    parked = kinds(events, "step_parked")
+    assert [e.step for e in parked] == ["write"]
+    assert parked[0].tool == "write_file"
+    assert parked[0].path == "out.txt"
+    assert parked[0].detail == "create out.txt"
+    assert kinds(events, "run_finished")[0].state == "parked"
+    assert not (tree / "out.txt").exists()
+
+
+async def test_the_parked_step_is_not_called_skipped(tree: Path, tmp_path: Path, registry) -> None:
+    """Skipped means "this will not happen". It is waiting, which is different."""
+    runs = tmp_path / "runs"
+    workflow = Workflow(
+        name="park",
+        steps=[
+            read(id="look"),
+            gated(id="write", needs=["look"]),
+            read(id="after", needs=["write"]),
+        ],
+    )
+    events = await park(workflow, registry, tree, runs)
+
+    assert [e.step for e in kinds(events, "step_skipped")] == ["after"]
+
+
+async def test_a_parked_run_is_listed_as_waiting(tree: Path, tmp_path: Path, registry) -> None:
+    from altus.workflow.runs import parked_runs
+
+    runs = tmp_path / "runs"
+    await park(Workflow(name="park", steps=[gated(id="write")]), registry, tree, runs)
+
+    waiting = parked_runs(runs)
+    assert len(waiting) == 1
+    assert "parked" in waiting[0][1]
+
+
+async def test_resume_finishes_the_run_with_a_person_at_the_gate(
+    tree: Path, tmp_path: Path, registry
+) -> None:
+    from altus.workflow.engine import resume_workflow
+
+    runs = tmp_path / "runs"
+    workflow = Workflow(
+        name="park",
+        steps=[
+            read(id="look"),
+            ToolStep(
+                id="write",
+                tool="write_file",
+                args={"path": "out.txt", "content": "${look}"},
+                needs=["look"],
+            ),
+        ],
+    )
+    first = await park(workflow, registry, tree, runs)
+    run_id = kinds(first, "run_started")[0].run_id
+
+    events = [
+        event
+        async for event in resume_workflow(
+            run_id,
+            workflow,
+            registry,
+            context(tree, registry),
+            runs_root=runs,
+        )
+    ]
+
+    assert kinds(events, "run_resumed")[0].at == "write"
+    assert [e.step for e in kinds(events, "step_finished")] == ["write"]
+    assert kinds(events, "run_finished")[0].state == "completed"
+    # The earlier step's output was replayed from the record, not recomputed.
+    assert "hello from step one" in (tree / "out.txt").read_text(encoding="utf-8")
+
+
+async def test_a_resumed_run_appends_to_the_same_record(
+    tree: Path, tmp_path: Path, registry
+) -> None:
+    from altus.workflow.engine import resume_workflow
+    from altus.workflow.runs import is_parked
+
+    runs = tmp_path / "runs"
+    workflow = Workflow(name="park", steps=[gated(id="write")])
+    run_id = kinds(await park(workflow, registry, tree, runs), "run_started")[0].run_id
+
+    async for _ in resume_workflow(
+        run_id, workflow, registry, context(tree, registry), runs_root=runs
+    ):
+        pass
+
+    replay = read_run(run_id, runs)
+    assert [e.type for e in replay].count("run_finished") == 2
+    assert not is_parked(replay)
+    assert "completed" in summarise(replay)
+    assert len(list(runs.glob("*.jsonl"))) == 1
+
+
+async def test_a_completed_step_is_never_run_twice(tree: Path, tmp_path: Path) -> None:
+    """A resume that re-ran a commit to get back to where it stopped would be
+    the safety mechanism causing the damage."""
+    from altus.workflow.engine import resume_workflow
+
+    counter = SlowTool()
+    registry = ToolRegistry(
+        [counter, *default_registry(kubernetes=False, aws=False, azure=False, gcp=False, mcp=False)]
+    )
+    calls = {"n": 0}
+    original = counter.run
+
+    async def counting(args, ctx):  # type: ignore[no-untyped-def]
+        calls["n"] += 1
+        return await original(args, ctx)
+
+    counter.run = counting  # type: ignore[method-assign]
+
+    runs = tmp_path / "runs"
+    workflow = Workflow(
+        name="park",
+        steps=[
+            ToolStep(id="slow", tool="slow_read", args={"delay": 0.01}),
+            gated(id="write", needs=["slow"]),
+        ],
+    )
+    run_id = kinds(await park(workflow, registry, tree, runs), "run_started")[0].run_id
+    assert calls["n"] == 1
+
+    async for _ in resume_workflow(
+        run_id, workflow, registry, context(tree, registry), runs_root=runs
+    ):
+        pass
+    assert calls["n"] == 1
+
+
+async def test_an_edited_workflow_refuses_the_resume(tree: Path, tmp_path: Path, registry) -> None:
+    """The steps already done were planned from a different file. Finishing
+    the new plan would be approving something nobody looked at."""
+    from altus.workflow.engine import resume_workflow
+
+    runs = tmp_path / "runs"
+    workflow = Workflow(name="park", steps=[read(id="look"), gated(id="write", needs=["look"])])
+    run_id = kinds(await park(workflow, registry, tree, runs), "run_started")[0].run_id
+
+    edited = Workflow(
+        name="park",
+        steps=[
+            read(id="look"),
+            ToolStep(
+                id="write",
+                tool="write_file",
+                args={"path": "somewhere-else.txt", "content": "hi"},
+                needs=["look"],
+            ),
+        ],
+    )
+    with pytest.raises(RunRefused) as refused:
+        async for _ in resume_workflow(
+            run_id, edited, registry, context(tree, registry), runs_root=runs
+        ):
+            pass
+    assert "has changed" in str(refused.value)
+
+
+async def test_a_run_that_is_not_parked_cannot_be_resumed(
+    tree: Path, tmp_path: Path, registry
+) -> None:
+    from altus.workflow.engine import resume_workflow
+
+    runs = tmp_path / "runs"
+    workflow = Workflow(name="fine", steps=[read(id="look")])
+    events = await collect(workflow, registry, context(tree, registry), record=True, runs_root=runs)
+    run_id = kinds(events, "run_started")[0].run_id
+
+    with pytest.raises(RunRefused) as refused:
+        async for _ in resume_workflow(
+            run_id, workflow, registry, context(tree, registry), runs_root=runs
+        ):
+            pass
+    assert "not parked" in str(refused.value)
+
+
+async def test_inputs_are_replayed_rather_than_recomputed(
+    tree: Path, tmp_path: Path, registry
+) -> None:
+    """`@git.origin` resolved in one checkout must not silently re-resolve in
+    whatever checkout happens to be current when somebody approves."""
+    from altus.workflow.engine import resume_workflow
+    from altus.workflow.models import Input
+
+    runs = tmp_path / "runs"
+    workflow = Workflow(
+        name="park",
+        inputs={"who": Input(description="a name")},
+        steps=[
+            ToolStep(
+                id="write",
+                tool="write_file",
+                args={"path": "out.txt", "content": "${inputs.who}"},
+            )
+        ],
+    )
+    events = await collect(
+        workflow,
+        registry,
+        context(
+            tree, registry, __import__("altus.tools.approval", fromlist=["x"]).ParkOnApproval()
+        ),
+        record=True,
+        runs_root=runs,
+        inputs={"inputs.who": "acme/api"},
+    )
+    run_id = kinds(events, "run_started")[0].run_id
+
+    async for _ in resume_workflow(
+        run_id, workflow, registry, context(tree, registry), runs_root=runs
+    ):
+        pass
+    assert (tree / "out.txt").read_text(encoding="utf-8") == "acme/api"

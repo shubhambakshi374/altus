@@ -1,10 +1,12 @@
 """What a workflow is.
 
-Three step kinds, because three is what Altus can actually do today: call one
-of its registered tools, ask the model to work something out, or stop and let a
-human decide. Shell execution and parallel fan-out are deliberately absent ---
-the roadmap sequences both after the engine, and a shell step needs a sandbox
-and an approval design roughly the size of one of the clouds.
+Three step kinds, because three is what a workflow needs: call one of its
+registered tools, ask the model to work something out, or stop and let a human
+decide. There is deliberately no fourth kind for running a command --- a shell
+step is a ``tool`` step calling ``shell_run``, so it inherits validation, the
+approval gate, the run record and the blast radius rather than growing its own
+copy of each. A step kind is the wrong unit for "this is a different thing to
+call"; it is the right unit for "this is a different thing to *do*".
 
 Steps carry ``needs`` rather than relying on their order in the file. The
 engine will want a DAG, and retrofitting dependency edges later would mean
@@ -25,6 +27,12 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 SLUG = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 MAX_NAME = 64
+
+#: The ceiling on `Workflow.parallel`. Not a resource limit --- every step here
+#: is waiting on somebody else's API --- but a limit on how many approval
+#: prompts can be queued up behind one another before a person stops reading
+#: them.
+MAX_PARALLEL = 8
 
 
 def valid_slug(value: str) -> bool:
@@ -188,13 +196,102 @@ class Input(BaseModel):
     required: bool = False
 
 
+DURATION = re.compile(r"^(\d+(?:\.\d+)?)\s*([smhd])$")
+
+#: Nothing may be polled faster than this. Every trigger asks somebody else's
+#: API the same question over and over, and a workflow file is not the place to
+#: discover what a vendor considers abuse.
+MIN_INTERVAL = 30.0
+
+
+def duration(text: str) -> float:
+    """``"15m"`` to seconds. Suffixed on purpose: a bare number is ambiguous
+    between seconds and minutes, and the ambiguity is a factor of sixty."""
+    found = DURATION.match(text.strip().lower())
+    if found is None:
+        raise ValueError(f"{text!r} is not a duration: try 30s, 15m, 1h or 1d")
+    scale = {"s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}[found.group(2)]
+    return float(found.group(1)) * scale
+
+
+class Trigger(BaseModel):
+    """Something other than a person starting a run.
+
+    Two kinds, and no more. ``schedule`` fires on an interval. ``watch`` polls
+    a read and fires when its answer *changes* --- "a new detection appeared"
+    rather than "there are detections". Change rather than per-item fan-out
+    because "the answer to this question is different now, so run" has exactly
+    one meaning, where "run once per new item" immediately needs an answer to
+    what an item is and what happens when fifty arrive at once.
+
+    There is deliberately no webhook kind. A listening socket is a separate
+    surface with its own authentication story, and adding one here would smuggle
+    it in behind a workflow feature.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["schedule", "watch"] = "schedule"
+    every: str = "1h"
+    """How often. A schedule fires this often; a watch looks this often."""
+    tool: str = ""
+    """``watch`` only: the read to poll. Validated to be a read, for the reason
+    a waiting step is: it is called forever, and nothing about "tell me when
+    this changes" implies anybody wanted a mutation repeated."""
+    args: dict[str, Any] = Field(default_factory=dict)
+    into: str = ""
+    """``watch`` only: the declared input the output is seeded into, so the run
+    can act on what changed rather than going and looking again."""
+
+    @model_validator(mode="after")
+    def _coherent(self) -> Trigger:
+        if duration(self.every) < MIN_INTERVAL:
+            raise ValueError(f"the shortest interval a trigger may use is {MIN_INTERVAL:g}s")
+        if self.kind == "watch" and not (self.tool and self.into):
+            raise ValueError("a watch trigger needs both 'tool' and 'into'")
+        if self.kind == "schedule" and (self.tool or self.into or self.args):
+            raise ValueError("a schedule trigger fires on time alone: drop 'tool', 'args', 'into'")
+        return self
+
+    @property
+    def seconds(self) -> float:
+        return duration(self.every)
+
+    def describe(self) -> str:
+        if self.kind == "schedule":
+            return f"every {self.every}"
+        return f"every {self.every}, when {self.tool} answers differently, into ${{inputs.{self.into}}}"
+
+
 class Workflow(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str
     description: str = ""
     inputs: dict[str, Input] = Field(default_factory=dict)
+    parallel: int = 1
+    """How many steps may be in flight at once.
+
+    1 --- the default --- is one step at a time, in dependency order, which is
+    the run whose record reads like what happened. Raising it lets steps with
+    no path between them run together: two scans of different systems, three
+    test suites. It is opt-in rather than automatic because a workflow's author
+    knows whether its independent steps are *really* independent (two of them
+    writing the same file are not, and ``needs`` does not say so), and because
+    every workflow written before this existed keeps its meaning.
+    """
+    triggers: list[Trigger] = Field(default_factory=list)
+    """What starts this run other than a person. Declared here rather than
+    somewhere else so the thing that starts a run and the run itself are one
+    reviewable artefact."""
     steps: list[AnyStep] = Field(default_factory=list)
+
+    @field_validator("parallel")
+    @classmethod
+    def _parallel_is_sane(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("parallel must be at least 1")
+        return min(value, MAX_PARALLEL)
 
     @field_validator("inputs")
     @classmethod

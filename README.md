@@ -160,6 +160,15 @@ extra_roots = ["/etc/nginx"]
 enabled = true
 max_iterations = 25
 max_file_bytes = 262144
+git = true
+
+[tools.shell]
+# Empty by default, and an empty list means there is no shell tool at all ---
+# not a shell tool that refuses. A binary missing from this list is refused
+# outright rather than asked about; the gate underneath asks what *this*
+# invocation will do, not whether you meant to allow curl.
+allow = ["make", "pytest", "uv", "npm"]
+timeout = 120
 ```
 
 ## Slash commands
@@ -663,10 +672,31 @@ down. That question goes through the ordinary approval machinery, so a workflow
 whose blast radius is privileged demands the typed challenge without the run
 screen knowing the rule. Declining at either level stops the run.
 
-Steps run one at a time in dependency order, ties broken by the file's order.
-`needs` describes a DAG and independent branches *could* run concurrently; they
-do not, because a sequential run is the one whose record reads like what
-happened.
+### One at a time, unless the workflow says otherwise
+
+Steps run in dependency order, ties broken by the file's order, and one at a
+time by default — a sequential run is the one whose record reads like what
+happened. `parallel = 3` at the top of the file lets a *wave* — the steps with
+no path between them — run together:
+
+```toml
+name = "sweep"
+parallel = 3
+```
+
+Opt-in rather than automatic, because the author is the one who knows whether
+two steps with no dependency edge are really independent: `needs` does not say
+that both of them write the same file. Every workflow written before this
+existed keeps its meaning exactly.
+
+Two things do not change when steps run together. **Approval prompts stay
+strictly one at a time** — concurrency here is for waiting on somebody else's
+API, never for asking a person two questions at once. And a stopping failure
+lets what is already in flight finish, then skips everything that had not
+begun, by name: killing a sibling mid-mutation to honour "the run stops here"
+is worse than letting it land. The record says which steps shared a wave, so
+"these happened in this order" and "these happened at the same time" stay
+different facts.
 
 ### Every run leaves a record
 
@@ -676,6 +706,97 @@ interrupted, and a record assembled at the end is exactly the record those runs
 never get. `/workflow runs` lists them; `/workflow runs <id>` reads one back.
 
 A run with no closing line reads as `interrupted`, never as completed.
+
+### Running one without the TUI
+
+`altus workflow` is the same engine with nothing rendering it, which is what a
+cron entry, a CI job and the trigger supervisor all need:
+
+```
+altus workflow list | show <name> | validate <name>
+altus workflow run <name> [key=value ...] [--unattended | --yes]
+altus workflow runs [--parked] · altus workflow resume <run id>
+altus workflow serve
+```
+
+Exit codes are the interface, because the caller is usually a script: **0**
+completed, **1** a step failed, **2** refused — invalid or declined — and **3**
+**parked**. The last one is the point: "somebody has to look at this" and "this
+is broken" call for different things, and a CI job should be able to tell them
+apart without reading the log.
+
+### Nobody there? The run parks
+
+The whole safety model here is a human at a gate, and an unattended run is by
+definition one with nobody at it. So it does not guess. `--unattended` installs
+a policy that *raises* rather than answering: the step stops, the record keeps
+the question the gate would have asked, and the run ends `parked`.
+
+```
+running vuln-fix: 6 steps, mutate
+  ✓ alerts             12 open advisories
+  ✓ plan               answered
+  ⏸ branch             needs approval to switch to fix/CVE-2026-1
+parked: 2 ran, 0 skipped — branch: needs approval to switch to
+```
+
+Parked is not denied. A denial is an answer somebody gave; this is nobody
+having been asked, and a record that conflates the two records a decision that
+was never made.
+
+`altus workflow runs --parked` lists what is waiting, and `altus workflow
+resume <id>` — or `/workflow resume <id>` in the TUI — picks it up on the same
+screen, through the same gates. Three things make that safe rather than
+convenient:
+
+- **The steps that already finished are replayed from the record, never re-run.**
+  A resume that re-ran a commit to get back to where it stopped would be the
+  safety mechanism causing the damage.
+- **The workflow is fingerprinted.** Edit the file and the resume is refused:
+  the steps already done were planned from a different file, and finishing the
+  new one would be approving something nobody looked at.
+- **The inputs are replayed too**, so `@git.origin` resolved in one checkout
+  does not quietly re-resolve in whatever checkout happens to be current when
+  somebody gets round to approving.
+
+### Something other than a person can start one
+
+```toml
+[[triggers]]
+kind  = "schedule"
+every = "1d"
+
+[[triggers]]
+kind  = "watch"
+every = "15m"
+tool  = "mcp_call"
+args  = { server = "crowdstrike", tool = "falcon_search_detections" }
+into  = "found"     # the answer arrives as ${inputs.found}
+```
+
+Two kinds, declared in the workflow file so the thing that starts a run and the
+run it starts are one artefact you can read in one sitting. A `schedule` fires
+on an interval; a `watch` polls a read and fires when the answer **changes**,
+handing that answer to the run so it can act on what changed rather than going
+to look again. The tool a watch polls must be a read — it is called forever,
+and nothing about "tell me when this changes" implies anybody wanted a write
+repeated.
+
+`altus workflow serve` watches them. It is a foreground supervisor, not a
+daemon: nothing is installed into launchd or systemd, so the decision about
+what runs unattended on this machine stays yours to make explicitly. Runs it
+starts are unattended by construction, which means they park.
+
+**First sight is not an event.** A watch that has never looked records what it
+sees and fires nothing; a schedule that has never fired records the time and
+waits out its interval. Otherwise restarting the supervisor — after a deploy,
+after a crash — would be a way to run everything at once, turning an
+operational hiccup into a fleet of unattended runs. The state is on disk for
+the same reason.
+
+There is deliberately **no webhook kind**. A listening socket is a separate
+surface with its own authentication story, and adding one here would smuggle it
+in behind a workflow feature.
 
 ### The blast radius is a floor, and says when it is one
 
@@ -1109,7 +1230,8 @@ tests/         mirrors it; tests/__snapshots__ holds the TUI SVGs
 - **Phase 3a — the workflow designer.** ✅ Compose multi-step workflows in a screen, in conversation or in a file, each with one honest blast radius. Headless, which is the promise the layering guard has been keeping since Phase 1.
 - **Phase 3b — the engine.** ✅ Run them: `${step}` substitution between steps, a failure that stops the run and names what it skipped, two gates, and a JSONL record written as it happens.
 - **Phase 3c — the factory floor.** ✅ CrowdStrike and ServiceNow, a `[mcp.custom]` door for the rest, local git, steps that wait, workflow inputs, and three templates that run end to end.
-- **Phase 3+ —** shell execution, triggers, and concurrency across independent branches.
+- **Phase 3+ — shell, concurrency and triggers.** ✅ An allowlisted `shell_run` behind the same gate, `parallel` across independent branches, a headless `altus workflow` surface, and runs that **park** at the gate when nobody is watching rather than guessing.
+- **Next —** per-item trigger fan-out, and whatever the first real factory floor asks for.
 
 ## License
 

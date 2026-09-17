@@ -89,6 +89,7 @@ def default_registry(
     *,
     writes: bool = True,
     git: bool = True,
+    shell: Any = None,
     kubernetes: bool | None = None,
     aws: bool | None = None,
     azure: bool | None = None,
@@ -115,6 +116,10 @@ def default_registry(
     ``mcp_settings`` is an ``McpSettings``; it lives outside ``CloudSettings``
     because MCP is not a cloud.
 
+    ``shell`` is a ``ShellSettings``. Its allowlist decides registration: with
+    no binaries listed there is no ``shell_run`` tool at all, so a session that
+    has not opted in is not carrying a shell it will only ever refuse to use.
+
     ``git`` registers the local git tools. They need no SDK and no credentials
     --- only a `git` binary, which every path here already assumes --- so they
     are on by default and `[tools] git = false` is how a session opts out.
@@ -126,6 +131,10 @@ def default_registry(
         from altus.tools.git import git_tools
 
         tools += git_tools(writes=writes)
+    if writes and getattr(shell, "allow", None):
+        from altus.tools.shell import ShellTool
+
+        tools.append(ShellTool())
     # Cloud tools are assembled below and filtered at the end, because their
     # own switches decide registration first and `writes` is the floor.
 

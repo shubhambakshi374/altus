@@ -8,6 +8,10 @@ people's software a process holding four sets of cloud credentials.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from pathlib import Path
+
 import pytest
 
 from altus.cloud.base import Sensitivity
@@ -20,8 +24,9 @@ from altus.mcp.expose import (
     why_not,
     withheld,
 )
-from altus.tools.base import sensitivity_of
+from altus.tools.base import ToolContext, sensitivity_of
 from altus.tools.registry import ToolRegistry, default_registry
+from altus.workspace import Workspace
 
 #: Everything a default server offers. Written out because this list is the
 #: security boundary, and a diff on it is the review.
@@ -214,3 +219,109 @@ def test_everything_withheld_says_why() -> None:
 
 def test_a_tool_that_does_not_exist_says_so_rather_than_pretending() -> None:
     assert "no tool called" in why_not("nonsense_tool", ExposeSettings(), registry())
+
+
+# --------------------------------------------------------------- on the wire
+
+
+@asynccontextmanager
+async def connected(
+    registry: ToolRegistry,
+    ctx: ToolContext,
+    settings: ExposeSettings,
+    *,
+    config: object = None,
+    elicit: object = None,
+) -> AsyncIterator[object]:
+    """A real client talking to a real server over in-memory pipes.
+
+    Driven through the protocol rather than by calling the handlers, because
+    the handlers are the easy half: what this catches is a shape the SDK
+    rejects, which is exactly what asserting on our own functions would miss.
+    """
+    import anyio
+    from mcp import ClientSession
+    from mcp.shared.memory import create_client_server_memory_streams
+
+    from altus.mcp.serve import build
+
+    server = build(registry, ctx, settings, config=config)
+    async with (
+        create_client_server_memory_streams() as ((cr, cw), (sr, sw)),
+        anyio.create_task_group() as group,
+    ):
+
+        async def run() -> None:
+            await server.run(sr, sw, server.create_initialization_options())
+
+        group.start_soon(run)
+        async with ClientSession(cr, cw, elicitation_callback=elicit) as session:
+            await session.initialize()
+            yield session
+        group.cancel_scope.cancel()
+
+
+def session_context(tmp_path: Path, policy: object = None) -> ToolContext:
+    from altus.tools.approval import RecordingPolicy
+
+    return ToolContext(
+        workspace=Workspace(root=tmp_path),
+        approvals=policy or RecordingPolicy(),
+    )
+
+
+async def test_a_client_sees_the_curated_surface(tmp_path: Path) -> None:
+    async with connected(registry(), session_context(tmp_path), ExposeSettings()) as client:
+        listed = await client.list_tools()
+
+    names = {tool.name for tool in listed.tools}
+    assert names == OFFERED
+    assert not names & set(NEVER)
+
+
+async def test_the_annotations_reach_the_client(tmp_path: Path) -> None:
+    """A client applying the same suspicion to us that we apply to vendors gets
+    the same answer either way, because ours are computed."""
+    async with connected(registry(), session_context(tmp_path), ExposeSettings()) as client:
+        listed = await client.list_tools()
+
+    topology = next(tool for tool in listed.tools if tool.name == "k8s_topology")
+    assert topology.annotations is not None
+    assert topology.annotations.read_only_hint is True
+    assert topology.annotations.destructive_hint is False
+    assert topology.annotations.open_world_hint is True
+
+
+async def test_a_read_runs_through_the_same_registry(tmp_path: Path) -> None:
+    async with connected(registry(), session_context(tmp_path), ExposeSettings()) as client:
+        result = await client.call_tool("k8s_contexts", {})
+
+    assert result.content
+    assert result.content[0].type == "text"
+
+
+async def test_a_withheld_tool_says_it_was_withheld(tmp_path: Path) -> None:
+    """Not "unknown tool" --- that would be a lie about a tool that exists, and
+    would send the caller hunting for a typo that is not there."""
+    async with connected(registry(), session_context(tmp_path), ExposeSettings()) as client:
+        result = await client.call_tool("mcp_do", {"server": "github", "tool": "x"})
+
+    assert result.is_error
+    text = result.content[0].text
+    assert "not offered" in text
+    assert "credentials" in text
+
+
+async def test_a_mutation_is_not_even_listed_without_allow_writes(tmp_path: Path) -> None:
+    async with connected(registry(), session_context(tmp_path), ExposeSettings()) as client:
+        listed = await client.list_tools()
+        result = await client.call_tool("k8s_delete", {"kind": "Pod", "name": "x"})
+
+    assert "k8s_delete" not in {tool.name for tool in listed.tools}
+    assert result.is_error
+    assert "allow_writes" in result.content[0].text
+
+
+async def test_the_server_says_what_it_is_for(tmp_path: Path) -> None:
+    async with connected(registry(), session_context(tmp_path), ExposeSettings()) as client:
+        assert "redacted" in (client.instructions or "")

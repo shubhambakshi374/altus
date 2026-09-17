@@ -271,6 +271,34 @@ class McpCustomSettings(BaseModel):
     reference: str = ""
 
 
+class ExposeSettings(BaseModel):
+    """Altus as an MCP server: what it offers other clients.
+
+    Off by default, and turning it on is only half of it --- ``altus mcp serve``
+    still has to be run. Two switches because this one decides what a server
+    *would* offer and the command decides whether there is one at all, and a
+    config file that could start a server by itself is a surprising thing to
+    find in a dotfile.
+
+    ``extra`` re-adds a tool Altus drops by default. It cannot reach the ones it
+    never offers --- relaying to vendor servers, running commands, writing
+    workflow files --- because an allowlist a config file can talk past is not
+    an allowlist.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    allow_writes: bool = False
+    """Offer the mutating tools at all. They still ask: the approval gate
+    travels to the client's human as an elicitation, and a client that cannot
+    elicit gets a refusal rather than a silent yes."""
+    workflows: bool = True
+    """Offer each saved workflow as a tool of its own."""
+    extra: list[str] = Field(default_factory=list)
+    deny: list[str] = Field(default_factory=list)
+
+
 class McpSettings(BaseModel):
     """The MCP servers Altus ships kitted out.
 
@@ -283,6 +311,8 @@ class McpSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = True
+    expose: ExposeSettings = Field(default_factory=ExposeSettings)
+    """The other direction: what Altus offers when it is the server."""
     servers: list[str] = Field(default_factory=list)
     """Empty means every server whose credentials are present."""
     allow_writes: bool = True

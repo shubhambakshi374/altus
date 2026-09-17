@@ -504,6 +504,104 @@ That is a real cost, and it is the point: the nine shipped servers were
 classified by a human against a source, and a tenth that nobody classified
 should not be able to sit in the list looking the same.
 
+### Pointing the telescope round: Altus *as* a server
+
+Everything above makes Altus a client of other people's servers. `altus mcp
+serve` makes it one — on stdio, spawned by a client, offering the part of Altus
+nobody else has: inventory and topology across four clouds, cost, quotas,
+`can-i`, schema lookup, and this machine's saved workflows.
+
+```jsonc
+// in the client's MCP config
+{ "altus": { "command": "altus", "args": ["mcp", "serve"] } }
+```
+
+**The surface is deliberately smaller than the registry**, because a server is
+a process holding credentials — in the TUI the person calling a tool is the
+person whose keys it uses, and over a wire they are not. `altus mcp expose`
+prints exactly what would be offered and what would not, with a reason for
+every absence, without starting anything:
+
+```
+49 tools would be offered:
+  aws_inventory          read         read-only open-world
+  k8s_topology           read         read-only open-world
+  ...
+21 would not:
+  mcp_do                 it would relay writes to vendor servers using Altus's credentials
+  shell_run              the shell allowlist was written for a person at the TUI, not for a remote caller
+  k8s_kubectl            it shells out to kubectl, and the allowlist behind that was written for …
+  read_file              every client has its own, and ours answers against a workspace sandbox this one cannot see
+```
+
+Three tiers, and the middle one is where most of the thinking went:
+
+- **Never offered, whatever the config says.** Anything that relays to another
+  vendor's server (`mcp_call`, `mcp_do`) — a client reaching CrowdStrike
+  through *our* keys is the textbook confused deputy, and no prompt fixes it,
+  because the prompt would be answered by somebody told only what the calling
+  model chose to say. Anything that runs a command (`shell_run`, `k8s_exec`,
+  `k8s_cp`, `k8s_port_forward`, and the `kubectl`/`aws`/`az`/`gcloud`
+  fallbacks, caught by what they *are* rather than by name). `workflow_save`,
+  because a client that can write a workflow file can write one that does
+  anything and then ask a human to approve a name. And `k8s_use_context`, which
+  retargets every later call on the connection while no later prompt mentions
+  it. `extra` cannot reach any of these: an allowlist a config file can talk
+  past is not an allowlist.
+- **Dropped by default, addable by name.** The filesystem four, and `k8s_raw`.
+- **Everything else**, gated by `allow_writes`.
+
+**The annotations are computed, not typed.** `readOnlyHint` and
+`destructiveHint` come from the same four-tier classifier `/tools` prints — so
+a client applying to us the same suspicion we apply to vendor servers gets the
+same answer either way.
+
+### The gate travels
+
+A mutating call does not become easier for arriving over a socket. If the
+client declared MCP's **elicitation** capability, the approval question goes to
+the human sitting in front of *it*, carrying exactly what the TUI modal shows:
+
+```
+[human sees] switch to fix/demo in git: local · fix/demo
+             target: git: local · fix/demo
+             currently on main.
+             would create fix/demo
+             Uncommitted changes travel with you, as they do with git switch.
+             undo: git switch main goes back
+```
+
+A privileged call still demands its typed challenge, as a string field the
+person has to fill in exactly. There is no `allow always` over the wire at all
+— a standing grant is scoped to a session with a person in it, and this one has
+a person only for as long as each question is on their screen.
+
+If the client **did not** declare elicitation, the mutating tools are not
+listed and calling one is refused with that reason. Not allowed, not parked,
+and emphatically not "the client probably asks its user" — that is a claim
+about software Altus cannot inspect, which is the one thing it refuses to do
+for vendor servers too.
+
+```toml
+[mcp.expose]
+enabled      = false   # serving is two decisions: this, and running the command
+allow_writes = false   # writes are a third
+workflows    = true
+extra        = []      # add back a dropped read, e.g. "k8s_raw"
+deny         = []
+```
+
+Each saved workflow becomes a tool of its own — `workflow_vuln-fix` — whose
+schema is its declared inputs and whose description carries its step count and
+blast radius, so a client sees named capabilities rather than a string it has
+to guess. Run records and workflow sources come back as resources
+(`altus://runs/<id>`, `altus://workflows/<name>`).
+
+Transport is **stdio only**. A client spawns the server, which then lives
+inside the client's own process boundary. An HTTP port would be an
+unauthenticated door into four clouds, and authenticating it is the same
+separate surface that kept webhooks out of the workflow engine.
+
 ## Workflows
 
 A workflow is several steps, in an order, with one blast radius --- the
@@ -1231,6 +1329,7 @@ tests/         mirrors it; tests/__snapshots__ holds the TUI SVGs
 - **Phase 3b — the engine.** ✅ Run them: `${step}` substitution between steps, a failure that stops the run and names what it skipped, two gates, and a JSONL record written as it happens.
 - **Phase 3c — the factory floor.** ✅ CrowdStrike and ServiceNow, a `[mcp.custom]` door for the rest, local git, steps that wait, workflow inputs, and three templates that run end to end.
 - **Phase 3+ — shell, concurrency and triggers.** ✅ An allowlisted `shell_run` behind the same gate, `parallel` across independent branches, a headless `altus workflow` surface, and runs that **park** at the gate when nobody is watching rather than guessing.
+- **Phase 4 — Altus as an MCP server.** ✅ `altus mcp serve` offers the curated read surface and this machine's workflows to any client, with the approval gate travelling to that client's human as an elicitation and a refusal when there is nobody to ask.
 - **Next —** per-item trigger fan-out, and whatever the first real factory floor asks for.
 
 ## License

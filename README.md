@@ -181,6 +181,8 @@ for the command you are writing.
 | | |
 |---|---|
 | `/help` | List commands |
+| `/map` · `/map <path>` | The repo map: packages, dependencies, where the work is |
+| `/symbol <name> [<kind>]` · `/def` | Where a name is defined |
 | `/setup [<provider>]` | Add a provider: key, health check, default model |
 | `/provider` · `/providers` | Interactive picker. Unconfigured providers open setup |
 | `/provider use <name>` | Switch directly |
@@ -205,6 +207,123 @@ for the command you are writing.
 | `/new` | Start a fresh session |
 
 `altus login` and `altus kube list|use|add` do the same from the shell.
+
+## Onboarding a codebase
+
+Turn one on an unfamiliar repository used to be cold: the model knew the root
+directory and spent its first few tool calls rediscovering that there is a
+`src/` and that the tests live in `tests/`. Those facts are the same every
+session, so Altus reads them once from an index.
+
+```
+/map
+```
+
+```
+WAI: 177 files, 3473 symbols (python 177)
+indexed just now
+
+Packages
+  src/altus/cloud          9 files, 3.8k lines  Cloud integrations. No textual imports.
+  src/altus/workflow      11 files, 2.6k lines  Workflows: the composable half of the factory.
+  src/altus/repomap        8 files, 1.9k lines  The repo map: what is in this codebase.
+
+Most depended on
+    52  src/altus/tools/base.py       The tool contract.
+    42  src/altus/cloud/base.py       Shared cloud primitives: sensitivity, targets.
+    34  src/altus/core/types.py       Normalized, provider-agnostic conversation types.
+
+Where the work is (last 2000 commits)
+    14  tests/test_tui.py             1 author, last 2026-09-16
+```
+
+`/map <dir>` lists a directory's files and what each one holds; `/map <file>`
+lists its definitions with line numbers, what it imports from this repo, and
+what imports it. `/symbol <name>` finds where a name is *defined* --- the
+question grep answers badly, since grep returns every mention and the
+definition is one line among the call sites. The model has the same two
+through the `repo_map` and `repo_symbol` tools.
+
+### This is not an embedding, deliberately
+
+The obvious design is to chunk the tree, embed it and search by similarity.
+Altus does not, for four reasons:
+
+- **The questions are structural.** Where is this defined, who imports it,
+  what is in this package --- a symbol table answers those *exactly*. Only
+  "where is the code that handles flaky vendors" is a similarity question, and
+  an agent that can grep gets there anyway.
+- **Chunking code is where retrieval quietly fails.** Fixed windows cut
+  functions in half. Doing it properly needs a parser --- and once you have the
+  syntax tree, the exact index is nearly free and strictly better.
+- **Staleness.** Every commit invalidates chunks, and a stale vector hit is
+  worse than no hit, because nothing about the answer says it is stale.
+- **It would be a hole in the redaction pass.** Altus's primary control on what
+  reaches a provider is that tool *results* are redacted and sized by a tool.
+  An indexer ships the whole tree in bulk, including the files the secret
+  denylist exists to keep out, at index time rather than at a human's request.
+  A local embedding model avoids that and costs a 2 GB dependency in a TUI.
+
+### How it stays correct and cheap
+
+Invalidation is by content hash with `stat` as the gate: size and mtime decide
+whether to read a file, the sha256 of its bytes decides whether to re-parse it.
+A file touched by a checkout that restored identical content is not re-parsed,
+and the gate closes again so it is not re-hashed next time either. On this
+repository a cold build is ~380ms and every pass after it ~38ms, which is why
+both tools reconcile *before* answering --- a stale symbol table is worse than
+none, because every line number in it looks plausible.
+
+The index is SQLite under the data directory, one database per repository root,
+keyed by the absolute path so two checkouts of the same project never share
+one. It is never written inside the tree Altus is also editing.
+
+The walk goes through the same `Workspace.resolve` containment and secret
+denylist as every other filesystem tool, prunes ignored directories rather than
+filtering them afterwards, caps file size and file count, and records a file
+that will not parse rather than retrying it every pass.
+
+### Languages
+
+Python needs nothing: it is parsed with the standard library's `ast`, which is
+the same parser the interpreter uses.
+
+Go, TypeScript, TSX, JavaScript, Rust, Java and Ruby need the extra:
+
+```bash
+uv pip install 'altus[repomap]'
+```
+
+That installs one `tree-sitter-<language>` wheel each, rather than
+`tree-sitter-language-pack`. The pack is one import for 160 languages, but its
+current release ships *none* of them --- it downloads grammars at first use and
+loads them as shared libraries, and an index of a local tree that begins by
+fetching and `dlopen`-ing a binary is not a local index. The individual wheels
+carry a compiled grammar and the grammar authors' own `queries/tags.scm`, and
+need no network ever.
+
+Without the extra, a Go repository is reported as *not indexed*, with the
+install line. It is never silently empty --- a map that found nothing and a
+repository that contains nothing must not look the same.
+
+Bash, HCL and C# are absent because their wheels ship no tags query, and
+inventing one per language would mean maintaining a parser's worth of node
+names here.
+
+### Switching it off
+
+```toml
+[tools.repo_map]
+enabled        = true    # false removes both tools from the session
+max_files      = 20000   # the walk stops here, and says the map is partial
+max_file_bytes = 524288  # larger files are counted, not parsed
+churn_commits  = 2000    # 0 drops the "where the work is" section
+```
+
+Neither tool is offered over MCP, for the reason the filesystem reads are not:
+they answer against the workspace the *server* was started in, not the
+repository the client is working on, and a map of the wrong tree is worse than
+no map because nothing in it looks wrong.
 
 ## AWS
 
@@ -1214,6 +1333,7 @@ altus/tools       the tools, one package per surface (git, fs, and the clouds)
 altus/cloud       Kubernetes, AWS, Azure and GCP: auth, classifiers, targets
 altus/mcp         the nine shipped MCP servers, their manifests, and the custom door
 altus/workflow    what a workflow is, how it runs, and its blast radius
+altus/repomap     the structural index: symbols, imports, churn — no textual imports
 altus/render      visuals, independent of the terminal drawing them
 altus/runner      one inference call
 altus/agent       the loop: inference, tool execution, repeat
@@ -1330,6 +1450,7 @@ tests/         mirrors it; tests/__snapshots__ holds the TUI SVGs
 - **Phase 3c — the factory floor.** ✅ CrowdStrike and ServiceNow, a `[mcp.custom]` door for the rest, local git, steps that wait, workflow inputs, and three templates that run end to end.
 - **Phase 3+ — shell, concurrency and triggers.** ✅ An allowlisted `shell_run` behind the same gate, `parallel` across independent branches, a headless `altus workflow` surface, and runs that **park** at the gate when nobody is watching rather than guessing.
 - **Phase 4 — Altus as an MCP server.** ✅ `altus mcp serve` offers the curated read surface and this machine's workflows to any client, with the approval gate travelling to that client's human as an elicitation and a refusal when there is nobody to ask.
+- **Phase 5 — onboarding a codebase.** ✅ A structural index — symbols, the import graph, and churn from git — built once and reconciled by content hash, behind `/map`, `/symbol` and two read-only tools. Exact rather than embedded, and deliberately so.
 - **Next —** per-item trigger fan-out, and whatever the first real factory floor asks for.
 
 ## License

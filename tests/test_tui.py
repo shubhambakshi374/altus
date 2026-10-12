@@ -1925,3 +1925,63 @@ def test_the_tui_shell_tool_still_changes_things() -> None:
     assert tool is not None
     assert not tool.read_only
     assert sensitivity_of(tool) is Sensitivity.MUTATE
+
+
+# ------------------------------------------------------------------- repo map
+
+
+def _mapped_tree(tmp_path) -> object:  # type: ignore[no-untyped-def]
+    root = tmp_path / "proj"
+    (root / "core").mkdir(parents=True)
+    (root / "core" / "__init__.py").write_text('"""The core."""\n')
+    (root / "core" / "engine.py").write_text('"""Runs it."""\n\n\nclass Engine: ...\n')
+    return root
+
+
+async def test_map_command_shows_the_repository_shape(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    app = AltusApp(config=Config(), provider=FakeProvider(), workspace_root=_mapped_tree(tmp_path))
+    async with app.run_test() as pilot:
+        await _send(pilot, "/map")
+        await pilot.app.workers.wait_for_complete()
+        await pilot.pause()
+        rendered = _notices(pilot)
+        assert "proj: 2 files" in rendered
+        assert "The core." in rendered
+
+
+async def test_map_command_takes_a_path(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    app = AltusApp(config=Config(), provider=FakeProvider(), workspace_root=_mapped_tree(tmp_path))
+    async with app.run_test() as pilot:
+        await _send(pilot, "/map core/engine.py")
+        await pilot.app.workers.wait_for_complete()
+        await pilot.pause()
+        assert "class Engine" in _notices(pilot)
+
+
+async def test_symbol_command_finds_a_definition(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    app = AltusApp(config=Config(), provider=FakeProvider(), workspace_root=_mapped_tree(tmp_path))
+    async with app.run_test() as pilot:
+        await _send(pilot, "/symbol Engine")
+        await pilot.app.workers.wait_for_complete()
+        await pilot.pause()
+        assert "core/engine.py:4" in _notices(pilot)
+
+
+async def test_symbol_command_needs_a_name(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    app = AltusApp(config=Config(), provider=FakeProvider(), workspace_root=_mapped_tree(tmp_path))
+    async with app.run_test() as pilot:
+        await _send(pilot, "/symbol")
+        await pilot.app.workers.wait_for_complete()
+        await pilot.pause()
+        assert "Usage: /symbol" in _notices(pilot)
+
+
+async def test_map_command_says_so_when_the_index_is_off(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    config = Config()
+    config.tools.repo_map.enabled = False
+    app = AltusApp(config=config, provider=FakeProvider(), workspace_root=_mapped_tree(tmp_path))
+    async with app.run_test() as pilot:
+        await _send(pilot, "/map")
+        await pilot.app.workers.wait_for_complete()
+        await pilot.pause()
+        assert "switched off" in _notices(pilot)

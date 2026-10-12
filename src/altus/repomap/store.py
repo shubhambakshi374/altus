@@ -214,6 +214,48 @@ class MapStore:
         )
         return [(str(row["language"]), int(row["n"])) for row in rows]
 
+    def all_files(self) -> list[tuple[str, str, int, str, int]]:
+        """``(path, language, lines, doc, symbols)`` for everything indexed."""
+        rows = self._db.execute(
+            "SELECT path, language, lines, doc, symbols FROM files ORDER BY path"
+        )
+        return [
+            (
+                str(row["path"]),
+                str(row["language"]),
+                int(row["lines"]),
+                str(row["doc"]),
+                int(row["symbols"]),
+            )
+            for row in rows
+        ]
+
+    def files_under(self, directory: str) -> list[tuple[str, str, int, str, int]]:
+        """The same, for one directory and everything below it.
+
+        ``.`` means the whole repository. A prefix match needs the trailing
+        slash or ``src/alt`` would also match ``src/altus``.
+        """
+        prefix = "" if directory in ("", ".") else directory.rstrip("/") + "/"
+        return [row for row in self.all_files() if row[0].startswith(prefix)]
+
+    def top_exports(self, directory: str, *, limit: int = 6) -> list[Symbol]:
+        """The public definitions a directory is most likely known for.
+
+        Types before functions, and longer definitions before shorter ones:
+        with nothing else to go on, the biggest public class in a package is a
+        better one-line answer to "what is this" than its first helper.
+        """
+        prefix = "" if directory in ("", ".") else directory.rstrip("/") + "/"
+        rows = self._db.execute(
+            "SELECT name, kind, line, end_line, parent, exported, signature, doc "
+            "FROM symbols WHERE exported = 1 AND parent = '' AND path LIKE ? "
+            "ORDER BY CASE kind WHEN 'class' THEN 0 WHEN 'type' THEN 0 "
+            "WHEN 'interface' THEN 0 ELSE 1 END, (end_line - line) DESC, name LIMIT ?",
+            (f"{prefix}%", limit),
+        )
+        return [_symbol(row) for row in rows]
+
     def touch(self, facts: FileFacts) -> None:
         """Record that a file's stat changed but its content did not.
 

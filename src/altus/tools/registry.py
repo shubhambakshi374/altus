@@ -90,6 +90,7 @@ def default_registry(
     writes: bool = True,
     git: bool = True,
     shell: Any = None,
+    repo_map: Any = None,
     kubernetes: bool | None = None,
     aws: bool | None = None,
     azure: bool | None = None,
@@ -120,11 +121,20 @@ def default_registry(
     no binaries listed there is no ``shell_run`` tool at all, so a session that
     has not opted in is not carrying a shell it will only ever refuse to use.
 
+    ``repo_map`` is a ``RepoMapSettings``; None means on. Unlike the cloud
+    surfaces it needs no SDK and no credentials --- only the workspace it was
+    already given --- so it is on by default and `[tools.repo_map] enabled =
+    false` is how a session opts out.
+
     ``git`` registers the local git tools. They need no SDK and no credentials
     --- only a `git` binary, which every path here already assumes --- so they
     are on by default and `[tools] git = false` is how a session opts out.
     """
     tools: list[Tool] = [ReadFileTool(), ListDirTool(), GlobTool(), GrepTool()]
+    if repo_map is None or getattr(repo_map, "enabled", True):
+        from altus.tools.repomap import repo_map_tools
+
+        tools += repo_map_tools()
     if writes:
         tools += [WriteFileTool(), EditFileTool(), DeletePathTool()]
     if git:

@@ -54,6 +54,24 @@ class ShellSettings(BaseModel):
     timeout: float = 120.0
 
 
+class RepoMapSettings(BaseModel):
+    """The repo map's ceilings. On by default: it is read-only, local, and
+    costs nothing until a tool is called."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    max_files: int = 20_000
+    """A ceiling on the walk, so a monorepo degrades to a partial map with a
+    note rather than a session that appears to have hung."""
+    max_file_bytes: int = 512 * 1024
+    """Larger files are counted and not parsed. A generated bundle is one
+    symbol table nobody wants and seconds of parsing to get it."""
+    churn_commits: int = 2_000
+    """History to read for the hotspots section. Zero turns it off --- useful
+    where `git log` is slow enough to notice, such as a very large monorepo."""
+
+
 class ToolSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -67,6 +85,9 @@ class ToolSettings(BaseModel):
     any workflow that fixes something and raises a pull request."""
     shell: ShellSettings = Field(default_factory=ShellSettings)
     """Running a command. Off until an allowlist says otherwise."""
+    repo_map: RepoMapSettings = Field(default_factory=RepoMapSettings)
+    """The structural index of the workspace, behind `repo_map` and
+    `repo_symbol`."""
 
 
 class Profile(BaseModel):

@@ -14,12 +14,18 @@ has not changed.
 Read-only git, with every failure degrading to "no churn data" rather than to
 an error. A repository with no history, a shallow clone, a directory that is
 not a checkout at all --- the map is still a map without this.
+
+Synchronous, unlike the rest of this codebase's git plumbing, because its one
+caller already runs on a worker thread: the whole reconcile pass is blocking
+work, and the SQLite connection it writes through belongs to that thread.
+Making this async would mean handing that connection back across the boundary,
+which SQLite refuses --- correctly.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
+import subprocess
 from pathlib import Path
 
 from altus.repomap.store import MapStore
@@ -43,25 +49,25 @@ COMMITS = 2_000
 MARK = "\x01"
 
 
-async def head(root: Path) -> str:
+def head(root: Path) -> str:
     """The current commit, or "" when this is not a usable checkout."""
-    code, out = await _git(root, "rev-parse", "HEAD")
+    code, out = _git(root, "rev-parse", "HEAD")
     return out.strip() if code == 0 else ""
 
 
-async def update(db: MapStore, root: Path, *, commits: int = COMMITS) -> int:
+def update(db: MapStore, root: Path, *, commits: int = COMMITS) -> int:
     """Refresh churn when HEAD has moved. Returns the number of files touched.
 
     Returning 0 is the ordinary case on a repeat call and is not a failure:
     the stored answer is still correct for the commit it was taken at.
     """
-    current = await head(root)
+    current = head(root)
     if not current:
         return 0
     if current == db.get_meta("churn_head"):
         return 0
 
-    rows = await collect(root, commits=commits)
+    rows = collect(root, commits=commits)
     if rows:
         db.put_churn(rows)
     db.set_meta("churn_head", current)
@@ -69,7 +75,7 @@ async def update(db: MapStore, root: Path, *, commits: int = COMMITS) -> int:
     return len(rows)
 
 
-async def collect(root: Path, *, commits: int = COMMITS) -> list[tuple[str, int, int, str]]:
+def collect(root: Path, *, commits: int = COMMITS) -> list[tuple[str, int, int, str]]:
     """``(path, commits, authors, last_seen)`` for every file in the history.
 
     One ``git log`` rather than one call per file: the per-file version is
@@ -80,7 +86,7 @@ async def collect(root: Path, *, commits: int = COMMITS) -> list[tuple[str, int,
     so counting them makes the files near a long-running branch look like the
     busiest code in the repository when nobody edited them at all.
     """
-    code, out = await _git(
+    code, out = _git(
         root,
         "log",
         f"-n{commits}",
@@ -114,18 +120,15 @@ async def collect(root: Path, *, commits: int = COMMITS) -> list[tuple[str, int,
     ]
 
 
-async def _git(root: Path, *args: str) -> tuple[int, str]:
+def _git(root: Path, *args: str) -> tuple[int, str]:
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "git",
-            "-C",
-            str(root),
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
+        done = subprocess.run(
+            ["git", "-C", str(root), *args],
+            capture_output=True,
+            timeout=TIMEOUT,
+            check=False,
         )
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=TIMEOUT)
-    except (OSError, TimeoutError) as exc:
+    except (OSError, subprocess.SubprocessError) as exc:
         log.debug("churn: git %s failed: %s", args[0] if args else "", exc)
         return 1, ""
-    return proc.returncode or 0, out.decode("utf-8", errors="replace")
+    return done.returncode, done.stdout.decode("utf-8", errors="replace")

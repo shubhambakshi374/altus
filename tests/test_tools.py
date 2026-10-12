@@ -34,10 +34,23 @@ def ctx(tree: Path) -> ToolContext:
 
 @pytest.fixture
 def registry():  # type: ignore[no-untyped-def]
-    # Filesystem tools only: the cloud sets and git have their own test modules.
+    # Filesystem tools only: the cloud sets, git and the repo map have their
+    # own test modules.
     return default_registry(
-        kubernetes=False, aws=False, azure=False, gcp=False, mcp=False, git=False
+        kubernetes=False,
+        aws=False,
+        azure=False,
+        gcp=False,
+        mcp=False,
+        git=False,
+        repo_map=_no_repo_map(),
     )
+
+
+def _no_repo_map():  # type: ignore[no-untyped-def]
+    from altus.config.models import RepoMapSettings
+
+    return RepoMapSettings(enabled=False)
 
 
 async def run(registry, name, args, ctx):  # type: ignore[no-untyped-def]
@@ -301,13 +314,44 @@ def test_registry_can_omit_the_write_tools() -> None:
     from altus.tools import default_registry as make
 
     assert make(
-        writes=False, kubernetes=False, aws=False, azure=False, gcp=False, mcp=False, git=False
+        writes=False,
+        kubernetes=False,
+        aws=False,
+        azure=False,
+        gcp=False,
+        mcp=False,
+        git=False,
+        repo_map=_no_repo_map(),
     ).names == [
         "glob",
         "grep",
         "list_dir",
         "read_file",
     ]
+
+
+def test_the_repo_map_registers_by_default_and_can_be_switched_off() -> None:
+    """It needs no SDK and no credentials --- only the workspace it already
+    has --- so unlike the cloud surfaces it is on unless configured off."""
+    from altus.config.models import RepoMapSettings
+    from altus.tools import default_registry as make
+
+    off = dict(kubernetes=False, aws=False, azure=False, gcp=False, mcp=False, git=False)
+    assert {"repo_map", "repo_symbol"} <= set(make(**off).names)
+    assert {"repo_map", "repo_symbol"} <= set(make(**off, repo_map=RepoMapSettings()).names)
+    assert not {"repo_map", "repo_symbol"} & set(
+        make(**off, repo_map=RepoMapSettings(enabled=False)).names
+    )
+
+
+def test_the_repo_map_survives_a_read_only_registry() -> None:
+    """Both tools are reads, so `writes=False` must not take them with it."""
+    from altus.tools import default_registry as make
+
+    names = make(
+        writes=False, kubernetes=False, aws=False, azure=False, gcp=False, mcp=False, git=False
+    ).names
+    assert {"repo_map", "repo_symbol"} <= set(names)
 
 
 def test_kubernetes_tools_register_only_when_the_sdk_is_present() -> None:

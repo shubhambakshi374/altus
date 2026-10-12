@@ -26,6 +26,7 @@ HEADLESS_PACKAGES = (
     "mcp",
     "render",
     "workflow",
+    "repomap",
 )
 SRC = Path(altus.__file__).parent
 

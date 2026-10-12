@@ -51,7 +51,16 @@ class AltusApp(App[None]):
         self.profile = profile
         self.workspace = build_workspace(self.config, root=workspace_root, extra_roots=extra_roots)
         self.registry: ToolRegistry = default_registry(
-            cloud=self.config.cloud, mcp_settings=self.config.mcp, git=self.config.tools.git
+            cloud=self.config.cloud,
+            mcp_settings=self.config.mcp,
+            git=self.config.tools.git,
+            # Without this the TUI was the one surface that could not run a
+            # command: `[tools.shell] allow` registered `shell_run` for
+            # workflows and for the MCP server, and silently did nothing here.
+            # The allowlist is empty by default, so passing it adds no tool to
+            # a session that has not opted in --- it only stops the opt-in
+            # being ignored on the surface a person is actually sitting at.
+            shell=self.config.tools.shell,
         )
         self.approvals = SessionApprovals(AllowAll() if auto_approve else InteractiveApproval(self))
         self.tool_ctx: ToolContext = build_tool_context(

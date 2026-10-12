@@ -941,10 +941,64 @@ async def cmd_new(app: AltusApp, args: list[str]) -> CommandResult:
     return CommandResult.silent()
 
 
+# ------------------------------------------------------------------- repo map
+
+
+async def cmd_map(app: AltusApp, args: list[str]) -> CommandResult:
+    """The structural index, for the person rather than the model.
+
+    Drives the same tool the model calls, rather than reaching into
+    ``altus.repomap`` directly: the tool is where the workspace containment
+    and the ceilings are applied, and a second path to the index would be a
+    second place to get those wrong.
+    """
+    tool = app.registry.get("repo_map") if app.registry else None
+    if tool is None:
+        return CommandResult.error(
+            "The repo map is switched off. Set [tools.repo_map] enabled = true to use it."
+        )
+
+    target = args[0] if args else ""
+    outcome = await app.registry.execute("repo_map", {"path": target}, app.tool_ctx)
+    if outcome.is_error:
+        return CommandResult.error(outcome.content)
+    return CommandResult(outcome.content, title=f"Map: {target}" if target else "Repo map")
+
+
+async def cmd_symbol(app: AltusApp, args: list[str]) -> CommandResult:
+    if not args:
+        return CommandResult.error("Usage: /symbol <name> [kind]")
+    if app.registry is None or "repo_symbol" not in app.registry:
+        return CommandResult.error(
+            "The repo map is switched off. Set [tools.repo_map] enabled = true to use it."
+        )
+
+    payload: dict[str, Any] = {"name": args[0]}
+    if len(args) > 1:
+        payload["kind"] = args[1]
+    outcome = await app.registry.execute("repo_symbol", payload, app.tool_ctx)
+    if outcome.is_error:
+        return CommandResult.error(outcome.content)
+    return CommandResult(outcome.content, title=f"Definitions of {args[0]}")
+
+
 def build_registry() -> CommandRegistry:
     registry = CommandRegistry()
     for command in (
         Command("help", "Show this list", "help", cmd_help, aliases=("?",)),
+        Command(
+            "map",
+            "Index this repository: packages, dependencies, where the work is",
+            "map [<path>]",
+            cmd_map,
+        ),
+        Command(
+            "symbol",
+            "Find where a name is defined",
+            "symbol <name> [<kind>]",
+            cmd_symbol,
+            aliases=("def",),
+        ),
         Command(
             "setup",
             "Add a provider: key, health check, default model",

@@ -1884,3 +1884,44 @@ async def test_the_aws_dashboard_uses_the_aws_panels(monkeypatch) -> None:  # ty
         await pilot.pause()
         assert len(list(screen.query(Panel))) == len(AWS_PANELS)
         assert "AWS" in screen._heading()
+
+
+# ----------------------------------------------------------------- the shell
+
+
+def test_the_shell_allowlist_reaches_the_tui_registry() -> None:
+    """`[tools.shell] allow` registered `shell_run` for workflows and for the
+    MCP server, and silently did nothing in the TUI --- so the one surface
+    with a person sitting at it was the one that could not run a command."""
+    config = Config()
+    config.tools.shell.allow = ["make", "pytest"]
+    app = AltusApp(config=config, provider=FakeProvider())
+
+    assert "shell_run" in app.registry
+    assert app.tool_ctx.shell_settings is not None
+    assert app.tool_ctx.shell_settings.allow == ["make", "pytest"]
+
+
+def test_no_allowlist_means_no_shell_tool_in_the_tui() -> None:
+    """A session that has not opted in must not carry a shell it would only
+    ever refuse to use."""
+    app = AltusApp(config=Config(), provider=FakeProvider())
+
+    assert app.registry is not None
+    assert "shell_run" not in app.registry
+
+
+def test_the_tui_shell_tool_still_changes_things() -> None:
+    """Registration is not an exemption: it arrives read-write, so it goes
+    through the same approval gate every other mutation does."""
+    from altus.cloud.base import Sensitivity
+    from altus.tools.base import sensitivity_of
+
+    config = Config()
+    config.tools.shell.allow = ["make"]
+    app = AltusApp(config=config, provider=FakeProvider())
+
+    tool = app.registry.get("shell_run")
+    assert tool is not None
+    assert not tool.read_only
+    assert sensitivity_of(tool) is Sensitivity.MUTATE

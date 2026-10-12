@@ -44,6 +44,32 @@ all = [
     "azure-identity>=1.20",
     "google-api-python-client>=2.150",
     "google-auth>=2.35",
+    "tree-sitter>=0.25",
+    "tree-sitter-go>=0.25",
+    "tree-sitter-typescript>=0.23",
+    "tree-sitter-javascript>=0.23",
+    "tree-sitter-rust>=0.24",
+    "tree-sitter-java>=0.23",
+    "tree-sitter-ruby>=0.23",
+]
+repomap = [
+    # Grammars for the repo map's non-Python extractors. One wheel per
+    # language, deliberately: `tree-sitter-language-pack` would be one import
+    # for 160 languages, but its current release ships no grammars and
+    # downloads them at first use, so an index of a local tree would begin by
+    # fetching a binary and loading it. These wheels carry the compiled
+    # grammar and its own `queries/tags.scm`, and need no network ever.
+    #
+    # Languages are here only if their wheel ships a tags query: bash, HCL and
+    # C# do not, and inventing queries for them would mean maintaining a
+    # parser's worth of node names in this repository.
+    "tree-sitter>=0.25",
+    "tree-sitter-go>=0.25",
+    "tree-sitter-typescript>=0.23",
+    "tree-sitter-javascript>=0.23",
+    "tree-sitter-rust>=0.24",
+    "tree-sitter-java>=0.23",
+    "tree-sitter-ruby>=0.23",
 ]
 mcp = [
     # 2.x, not 1.9: the client path here already calls the v2 spelling

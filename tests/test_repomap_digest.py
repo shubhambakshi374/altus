@@ -42,31 +42,31 @@ def repo(tmp_path: Path) -> Path:
     return root
 
 
-async def test_churn_counts_commits_per_file(repo: Path) -> None:
-    rows = dict((path, count) for path, count, _authors, _seen in await churn.collect(repo))
+def test_churn_counts_commits_per_file(repo: Path) -> None:
+    rows = dict((path, count) for path, count, _authors, _seen in churn.collect(repo))
     assert rows["src/busy.py"] == 4
     assert rows["src/quiet.py"] == 1
 
 
-async def test_churn_counts_distinct_authors(repo: Path) -> None:
+def test_churn_counts_distinct_authors(repo: Path) -> None:
     _run(repo, "config", "user.name", "Two")
     _run(repo, "config", "user.email", "two@example.com")
     (repo / "src" / "busy.py").write_text("A = 9\n")
     _run(repo, "add", "-A")
     _run(repo, "commit", "-q", "-m", "second author")
 
-    rows = {path: authors for path, _count, authors, _seen in await churn.collect(repo)}
+    rows = {path: authors for path, _count, authors, _seen in churn.collect(repo)}
     assert rows["src/busy.py"] == 2
     assert rows["src/quiet.py"] == 1
 
 
-async def test_churn_records_the_most_recent_date(repo: Path) -> None:
-    rows = {path: seen for path, _count, _authors, seen in await churn.collect(repo)}
+def test_churn_records_the_most_recent_date(repo: Path) -> None:
+    rows = {path: seen for path, _count, _authors, seen in churn.collect(repo)}
     assert rows["src/busy.py"]
     assert rows["src/busy.py"] == rows["src/quiet.py"]  # same day in a test run
 
 
-async def test_merge_commits_are_not_counted(repo: Path) -> None:
+def test_merge_commits_are_not_counted(repo: Path) -> None:
     """A merge touches everything both sides touched, so counting merges makes
     whatever sat near a long branch look like the busiest code in the tree."""
     _run(repo, "checkout", "-q", "-b", "side")
@@ -79,31 +79,31 @@ async def test_merge_commits_are_not_counted(repo: Path) -> None:
     _run(repo, "commit", "-q", "-m", "on main")
     _run(repo, "merge", "-q", "--no-ff", "-m", "merge side", "side")
 
-    rows = {path: count for path, count, _a, _s in await churn.collect(repo)}
+    rows = {path: count for path, count, _a, _s in churn.collect(repo)}
     assert rows["src/quiet.py"] == 2  # the first commit and the side one, not the merge
 
 
-async def test_churn_is_skipped_when_head_has_not_moved(repo: Path) -> None:
+def test_churn_is_skipped_when_head_has_not_moved(repo: Path) -> None:
     with store_for(repo) as db:
-        first = await churn.update(db, repo)
+        first = churn.update(db, repo)
         assert first > 0
-        assert await churn.update(db, repo) == 0
+        assert churn.update(db, repo) == 0
 
         (repo / "src" / "busy.py").write_text("A = 99\n")
         _run(repo, "add", "-A")
         _run(repo, "commit", "-q", "-m", "moved")
-        assert await churn.update(db, repo) > 0
+        assert churn.update(db, repo) > 0
 
 
-async def test_a_directory_that_is_not_a_checkout_has_no_churn(tmp_path: Path) -> None:
+def test_a_directory_that_is_not_a_checkout_has_no_churn(tmp_path: Path) -> None:
     plain = tmp_path / "plain"
     plain.mkdir()
-    assert await churn.head(plain) == ""
+    assert churn.head(plain) == ""
     with store_for(plain) as db:
-        assert await churn.update(db, plain) == 0
+        assert churn.update(db, plain) == 0
 
 
-async def test_hotspots_only_names_files_that_still_exist(repo: Path) -> None:
+def test_hotspots_only_names_files_that_still_exist(repo: Path) -> None:
     """git remembers deleted files; a list of hotspots pointing at paths that
     are gone is a list of dead ends."""
     (repo / "src" / "quiet.py").unlink()
@@ -113,7 +113,7 @@ async def test_hotspots_only_names_files_that_still_exist(repo: Path) -> None:
     workspace = Workspace(root=repo)
     with store_for(repo) as db:
         reconcile(workspace, store=db)
-        await churn.update(db, repo)
+        churn.update(db, repo)
         paths = [path for path, _c, _a, _s in db.hotspots()]
         assert "src/busy.py" in paths
         assert "src/quiet.py" not in paths

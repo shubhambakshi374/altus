@@ -317,7 +317,10 @@ def _session(
     config = load_config()
     workspace = build_workspace(config)
     registry = default_registry(
-        cloud=config.cloud, mcp_settings=config.mcp, shell=config.tools.shell
+        cloud=config.cloud,
+        mcp_settings=config.mcp,
+        shell=config.tools.shell,
+        repo_map=config.tools.repo_map,
     )
     policy: Any
     if unattended:

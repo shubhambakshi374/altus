@@ -308,6 +308,7 @@ def build_tool_context(
         workflow_settings=config.workflow,
         registry=registry,
         shell_settings=config.tools.shell,
+        repo_map_settings=config.tools.repo_map,
     )
 
 

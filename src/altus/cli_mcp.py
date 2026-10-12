@@ -31,7 +31,10 @@ def mcp_expose(
         update={"allow_writes": writes or None} if writes else {}
     )
     registry = default_registry(
-        cloud=config.cloud, mcp_settings=config.mcp, shell=config.tools.shell
+        cloud=config.cloud,
+        mcp_settings=config.mcp,
+        shell=config.tools.shell,
+        repo_map=config.tools.repo_map,
     )
 
     offered = exposed(registry, settings)
@@ -106,7 +109,10 @@ def mcp_serve() -> None:
 
     workspace = build_workspace(config)
     registry = default_registry(
-        cloud=config.cloud, mcp_settings=config.mcp, shell=config.tools.shell
+        cloud=config.cloud,
+        mcp_settings=config.mcp,
+        shell=config.tools.shell,
+        repo_map=config.tools.repo_map,
     )
     # DenyAll is the floor, not the policy: `_with_gate` swaps in the
     # elicitation gate per call, and a request that reaches this one is a

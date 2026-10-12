@@ -71,6 +71,11 @@ DROPPED: dict[str, str] = {
     "sandbox this one cannot see",
     "k8s_raw": "a GET to an arbitrary API path: read-only, but its blast radius "
     "cannot be worked out from the tool name",
+    "repo_map": "it indexes the workspace this server was started in, which is not "
+    "the repository the client is working on --- and a map of the wrong tree "
+    "is worse than no map, because every line number in it looks right",
+    "repo_symbol": "it answers from an index of the workspace this server was "
+    "started in, not of the client's own repository",
 }
 
 #: Prefixes whose tools act on something outside this machine. MCP calls that

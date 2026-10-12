@@ -117,6 +117,10 @@ class ToolContext:
     """The session's ``ToolRegistry``, for the one tool that has to reason
     about the others. Typed loosely because ``tools.registry`` imports this
     module. None means a caller that never needed it."""
+    repo_map_settings: Any = None
+    """An ``altus.config.models.RepoMapSettings``. Read at call time so the
+    walk's ceilings are the configured ones even in a session whose registry
+    was built before the config was reloaded."""
     shell_settings: Any = None
     """An ``altus.config.models.ShellSettings``. Read at call time as well as
     at registration, for the reason ``cli_allowlist`` is: a tool must not

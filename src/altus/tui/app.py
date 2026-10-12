@@ -61,6 +61,7 @@ class AltusApp(App[None]):
             # a session that has not opted in --- it only stops the opt-in
             # being ignored on the surface a person is actually sitting at.
             shell=self.config.tools.shell,
+            repo_map=self.config.tools.repo_map,
         )
         self.approvals = SessionApprovals(AllowAll() if auto_approve else InteractiveApproval(self))
         self.tool_ctx: ToolContext = build_tool_context(

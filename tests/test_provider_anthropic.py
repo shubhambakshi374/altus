@@ -149,7 +149,11 @@ async def test_request_body_shape(provider: AnthropicProvider) -> None:
     body = messages.body
     assert body["system"] == "be terse"
     assert body["max_tokens"] == 1024
-    assert body["temperature"] == 0.2
+    # The sampling parameters are not parameters of the SDK's `messages.create`,
+    # so they travel in `extra_body`, which it merges into the payload. See
+    # tests/test_provider_sdk_surfaces.py, which pins that against the real SDK
+    # --- this fake takes **body and would accept them either way.
+    assert body["extra_body"] == {"temperature": 0.2}
     assert body["stop_sequences"] == ["STOP"]
     assert body["top_k"] == 5, "extra must pass through"
     assert body["stream"] is True

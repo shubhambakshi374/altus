@@ -163,7 +163,14 @@ def list_contexts(extra: tuple[str, ...] = ()) -> tuple[list[KubeContext], str |
     active: str | None = None
     for path in kubeconfig_paths(extra):
         try:
-            contexts, current = kube_config.list_kube_config_contexts(config_file=str(path))
+            # kubernetes 37 added a py.typed marker without annotating its
+            # functions, so --strict now sees a typed package full of untyped
+            # defs. Ignored at the three call sites rather than by relaxing
+            # disallow_untyped_calls for this module: the override would apply
+            # to everything in here, including our own code.
+            contexts, current = kube_config.list_kube_config_contexts(  # type: ignore[no-untyped-call]
+                config_file=str(path)
+            )
         except Exception:  # unreadable or malformed; skip rather than fail the command
             continue
         if active is None and current:
@@ -205,8 +212,13 @@ def build_client(context: str | None, extra: tuple[str, ...] = ()) -> Any:
 
     paths = kubeconfig_paths(extra)
     config_file = str(paths[0]) if paths else None
-    api = kube_config.new_client_from_config(config_file=config_file, context=context)
-    return DynamicClient(kube_client.ApiClient(configuration=api.configuration))
+    # Untyped despite kubernetes 37's py.typed marker; see list_contexts.
+    api = kube_config.new_client_from_config(  # type: ignore[no-untyped-call]
+        config_file=config_file, context=context
+    )
+    return DynamicClient(  # type: ignore[no-untyped-call]
+        kube_client.ApiClient(configuration=api.configuration)
+    )
 
 
 def set_current_context(name: str, extra: tuple[str, ...] = ()) -> Path:

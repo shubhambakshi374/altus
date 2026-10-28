@@ -128,10 +128,19 @@ class AnthropicProvider(BaseProvider):
         }
         if request.system:
             body["system"] = request.system
+        # The sampling parameters are not in the SDK's typed `messages.create`
+        # --- they were already absent at the version this adapter was written
+        # against, so `temperature=...` was a TypeError on the first turn of
+        # any profile that set one, and nothing caught it because the suite
+        # drives a fake provider. They are still API fields, so they travel in
+        # `extra_body`, which the SDK merges into the request payload.
+        sampling: dict[str, Any] = {}
         if request.temperature is not None:
-            body["temperature"] = request.temperature
+            sampling["temperature"] = request.temperature
         if request.top_p is not None:
-            body["top_p"] = request.top_p
+            sampling["top_p"] = request.top_p
+        if sampling:
+            body["extra_body"] = sampling
         if request.stop_sequences:
             body["stop_sequences"] = request.stop_sequences
         if request.tools:

@@ -44,7 +44,12 @@ from altus.core.types import (
 from altus.providers.base import BaseProvider, ProviderCapabilities
 
 if TYPE_CHECKING:
-    from mistralai import Mistral
+    # `mistralai.client`, not `mistralai`: the top-level package is a
+    # namespace package with no re-exports, so `from mistralai import Mistral`
+    # is an ImportError --- and was at the version this adapter was written
+    # against. The import is lazy and the suite drives a fake provider, so
+    # nothing surfaced it until the SDK surfaces were checked by hand.
+    from mistralai.client import Mistral
 
 _FINISH_REASONS = {
     "stop": StopReason.END_TURN,
@@ -73,7 +78,7 @@ class MistralProvider(BaseProvider):
 
     def _get_client(self) -> Mistral:
         if self._client is None:
-            from mistralai import Mistral
+            from mistralai.client import Mistral
 
             from altus.config.secrets import require_api_key
 
@@ -91,15 +96,25 @@ class MistralProvider(BaseProvider):
             response = await self._get_client().models.list_async()
         except Exception as exc:
             raise self._map_error(exc) from exc
-        return [
-            catalog.get(item.id)
-            or ModelInfo(
-                id=item.id,
-                provider=self.name,
-                context_window=getattr(item, "max_context_length", 0) or 0,
+        models: list[ModelInfo] = []
+        for item in response.data or []:
+            # The SDK types this list as a union that includes
+            # `UnknownModelListData` --- a card it could not classify, which
+            # carries no id. Skipped rather than coerced: a model we cannot
+            # name is one the picker could not select either, and inventing an
+            # id would put an unusable entry in the list.
+            identifier = str(getattr(item, "id", "") or "")
+            if not identifier:
+                continue
+            models.append(
+                catalog.get(identifier)
+                or ModelInfo(
+                    id=identifier,
+                    provider=self.name,
+                    context_window=getattr(item, "max_context_length", 0) or 0,
+                )
             )
-            for item in (response.data or [])
-        ]
+        return models
 
     async def stream(self, request: ChatRequest) -> AsyncIterator[StreamEvent]:
         client = self._get_client()
